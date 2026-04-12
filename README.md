@@ -1,6 +1,6 @@
 # AnyVar Specification
 
-**Version:** 0.2.0 (Draft)
+**Version:** 0.3.0 (Draft)
 **Date:** April 2026
 **Purpose:** A canonical cross-language, C-ABI-compatible tagged union (variant) for any system requiring lightweight dynamic values across language boundaries.
 
@@ -78,8 +78,8 @@ graph TD
         M["MAP<br/>7<br/><i>string to AVar</i>"]
     end
 
-    subgraph "Extension"
-        C["CUSTOM<br/>255<br/><i>opaque pointer</i>"]
+    subgraph "Backend Dispatch"
+        C["A_BACKEND<br/>255<br/><i>vtable + data*</i>"]
     end
 
     AV --> N
@@ -105,16 +105,20 @@ graph TD
 | `A_BINARY` | Byte buffer | `5` | `str { data, len, owned }` | ptr + size_t + bool |
 | `A_ARRAY` | Variant array | `6` | `array { items, len }` | ptr + size_t |
 | `A_MAP` | String→Variant map | `7` | `map { keys, values, len }` | 2 ptrs + size_t |
-| `A_CUSTOM` | User extension | `255` | `void* custom` | ptr |
+| `A_BACKEND` | Backend dispatch | `255` | `backend { vtable*, data* }` | 2 ptrs |
+
+> **Note:** `A_BACKEND` supersedes the earlier `A_CUSTOM` sentinel. Custom extension types are simply backends with their own vtable — `A_BACKEND` is the one extension mechanism.
 
 ---
 
 ## 3. Architecture & C ABI
 
-AnyVar separates into two stable layers:
+`AVar` is a **single unified struct** for all paths:
 
-- **Universal Handle** (`AVar`) — a fat pointer (backend vtable + opaque storage) that all application code touches. The default backend is selected automatically; existing call sites require no changes.
-- **Backend** (`ABackend`) — a vtable struct implementing type operations for a specific format. The default backend uses the original native C struct layout (`AVarNative`).
+- **Native path** (`type` 0–254) — byte-for-byte identical to the original tagged union layout. No extra fields. No heap allocation for scalars. `v->type` is the first field, readable with a single load and no indirection.
+- **Backend path** (`type == A_BACKEND = 255`) — `u.backend` holds a vtable pointer and opaque data pointer. All `a_var_*` helpers detect this with `__builtin_expect(v->type != A_BACKEND, 1)` so the native path is always the hot inline path.
+
+Custom formats (CBOR, JSON, user-defined) are entered explicitly via `a_var_convert()` and are represented as `A_BACKEND` instances. `AVarNative` is retained as a documentation alias (`typedef AVar AVarNative`).
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#909090', 'secondaryColor': '#808080', 'tertiaryColor': '#707070', 'primaryTextColor': '#000000', 'secondaryTextColor': '#000000', 'tertiaryTextColor': '#000000', 'noteTextColor': '#000000', 'lineColor': '#404040' }}}%%
@@ -123,56 +127,106 @@ graph TB
         APP["a_var_set_i64(&v, 42)<br/>a_var_as_string(&v, &len)"]
     end
     subgraph "Universal API (anyvar.h)"
-        API["a_var_* helpers<br/>dispatch via _backend vtable"]
+        API["a_var_* helpers<br/>branch on v->type != A_BACKEND"]
     end
-    subgraph "Backend Implementations"
-        NB["Native (default)<br/>AVarNative struct"]
+    subgraph "Dispatch"
+        NB["Native path<br/>type 0–254, fully inline"]
         CB["CBOR Backend<br/>AVAR_CBOR_BACKEND"]
         JB["JSON Backend<br/>AVAR_JSON_BACKEND"]
         XB["Custom Backend<br/>ABackend impl"]
     end
     APP --> API
-    API --> NB
-    API --> CB
-    API --> JB
-    API --> XB
+    API -->|"type != A_BACKEND (hot path)"| NB
+    API -->|"type == A_BACKEND"| CB
+    API -->|"type == A_BACKEND"| JB
+    API -->|"type == A_BACKEND"| XB
 ```
 
 ```c
 typedef enum AVarType {
-    A_NULL     = 0,
-    A_BOOL     = 1,
-    A_INT64    = 2,
-    A_DOUBLE   = 3,
-    A_STRING   = 4,    /* UTF-8 encoded text        */
-    A_BINARY   = 5,    /* arbitrary byte buffer      */
-    A_ARRAY    = 6,    /* array of AVar              */
-    A_MAP      = 7,    /* string keys → AVar values  */
-    A_CUSTOM   = 255   /* user-defined extension type */
+    A_NULL    = 0,
+    A_BOOL    = 1,
+    A_INT64   = 2,
+    A_DOUBLE  = 3,
+    A_STRING  = 4,     /* UTF-8 encoded text                          */
+    A_BINARY  = 5,     /* arbitrary byte buffer                        */
+    A_ARRAY   = 6,     /* array of AVar                               */
+    A_MAP     = 7,     /* string keys → AVar values                   */
+    /* 8–254 reserved for future native types */
+    A_BACKEND = 255    /* backend dispatch: u.backend.{vtable, data}  */
 } AVarType;
 ```
 
-### 3.1 Universal Handle
+### 3.1 The AVar Struct
 
 ```c
-/* AVar — universal variant handle.
- * A fat pointer: backend vtable + opaque per-instance storage.
- * Zero-initialise and call any a_var_set_*() — the default backend
- * is selected automatically. No extra parameters required.
+/* AVar — single unified type for native and backend paths.
+ *
+ * Native path (type 0–254):
+ *   Byte-for-byte identical to the original v0.1 tagged union.
+ *   Zero-init is a valid native null:  AVar v = {0};  →  type = A_NULL
+ *
+ * Backend path (type == A_BACKEND):
+ *   u.backend.{vtable, data} dispatch all operations.
  */
-typedef struct AVar {
-    const ABackend* _backend;   /* NULL → AVAR_DEFAULT_BACKEND auto-selected */
+typedef struct AVar AVar;
+typedef struct ABackend ABackend;
+
+struct AVar {
+    AVarType type;        /* first field — always readable, zero indirection  */
 
     union {
-        void*    _ptr;          /* heap-allocated backend data               */
-        int64_t  _i64;          /* inline scalar — no heap allocation        */
-        double   _d;            /* inline scalar — no heap allocation        */
-        uint8_t  _buf[8];       /* small inline buffer                       */
-    } _storage;
-} AVar;
+        /* ── Native path: type 0–254 ──────────────────────────────────── */
+        bool    b;                                        /* A_BOOL          */
+        int64_t i64;                                      /* A_INT64         */
+        double  d;                                        /* A_DOUBLE        */
+
+        struct {                                          /* A_STRING/BINARY */
+            char*  data;
+            size_t len;
+            bool   owned;
+        } str;
+
+        struct {                                          /* A_ARRAY         */
+            struct AVar* items;
+            size_t len;
+        } array;
+
+        struct {                                          /* A_MAP           */
+            struct AVar* keys;
+            struct AVar* values;
+            size_t len;
+        } map;
+
+        /* ── Backend path: type == A_BACKEND ─────────────────────────── */
+        struct {
+            const ABackend* vtable;
+            void*           data;
+        } backend;
+    } u;
+};
 ```
 
-Fields prefixed `_` are private. Never access them directly; always use the helper API.
+All `a_var_*` helpers branch on `v->type != A_BACKEND`. The native path is inlined; the backend path is a cold call through the vtable. Never access `u` members directly.
+
+**Helper dispatch pattern:**
+
+```c
+static inline AVarType a_var_type(const AVar* v) {
+    if (__builtin_expect(v->type != A_BACKEND, 1))
+        return v->type;                    /* first field, no indirection */
+    return v->u.backend.vtable->get_type(v);
+}
+
+static inline void a_var_set_i64(AVar* v, int64_t val) {
+    if (__builtin_expect(v->type != A_BACKEND, 1)) {
+        v->type  = A_INT64;
+        v->u.i64 = val;
+        return;
+    }
+    v->u.backend.vtable->set_i64(v, val);
+}
+```
 
 ### 3.2 Backend Vtable
 
@@ -218,65 +272,25 @@ typedef struct ABackend {
     int (*decode_json) (AVar* v, const char* json);
 } ABackend;
 
-/* Built-in backends */
-extern const ABackend AVAR_DEFAULT_BACKEND;  /* native C struct (default)  */
+/* Built-in backends (native path needs no backend constant) */
 extern const ABackend AVAR_CBOR_BACKEND;     /* CBOR in-memory             */
 extern const ABackend AVAR_JSON_BACKEND;     /* JSON in-memory             */
 ```
 
-### 3.3 Default Backend Internal Type
+### 3.3 AVarNative
 
-The default backend stores data as `AVarNative` — the original tagged union C struct, now an implementation detail of `AVAR_DEFAULT_BACKEND`. Users working through the universal API never interact with this directly.
+`AVarNative` is a **documentation alias** for `AVar`, retained for FFI binding authors who need to refer to the native-path layout explicitly. There is only one struct.
 
 ```c
-/* AVarNative — internal representation of the default backend.
- * Identical to the pre-backend AVar layout; the C ABI is unchanged.
- * Language bindings that previously mapped to AVar now map here.
+/* Documentation alias — byte-for-byte identical to AVar on the native path.
+ * FFI bindings that previously mapped to the v0.1 AVar struct map here.
  */
-typedef struct AVarNative {
-    AVarType type;              /* tag (4 bytes; uint8_t for embedded)     */
-
-    union {
-        bool    b;              /* A_BOOL                                  */
-        int64_t i64;            /* A_INT64                                 */
-        double  d;              /* A_DOUBLE                                */
-
-        struct {                /* A_STRING and A_BINARY                   */
-            char*  data;        /* pointer to buffer (UTF-8 for string)   */
-            size_t len;         /* length in bytes                        */
-            bool   owned;       /* true = caller must free this memory    */
-        } str;
-
-        struct {                /* A_ARRAY                                 */
-            struct AVarNative* items;
-            size_t len;
-        } array;
-
-        struct {                /* A_MAP                                   */
-            struct AVarNative* keys;    /* array of A_STRING variants     */
-            struct AVarNative* values;  /* corresponding values           */
-            size_t len;
-        } map;
-
-        void* custom;           /* A_CUSTOM — opaque pointer               */
-    } u;
-} AVarNative;
+typedef AVar AVarNative;
 ```
 
 ### Memory Layout (64-bit)
 
-`AVar` universal handle (fat pointer — two machine words):
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#909090', 'secondaryColor': '#808080', 'tertiaryColor': '#707070', 'primaryTextColor': '#000000', 'secondaryTextColor': '#000000', 'tertiaryTextColor': '#000000', 'noteTextColor': '#000000', 'lineColor': '#404040' }}}%%
-packet-beta
-  0-7: "_backend* (8B)"
-  8-15: "_storage (8B)"
-```
-
-> **Size:** 16 bytes on 64-bit — two machine words.
-
-`AVarNative` default backend internal struct:
+`AVar` — single struct, native path (`type` 0–254):
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#909090', 'secondaryColor': '#808080', 'tertiaryColor': '#707070', 'primaryTextColor': '#000000', 'secondaryTextColor': '#000000', 'tertiaryTextColor': '#000000', 'noteTextColor': '#000000', 'lineColor': '#404040' }}}%%
@@ -288,16 +302,16 @@ packet-beta
   24-31: "union member 3 (8B)"
 ```
 
-> **Typical size:** 24–32 bytes on 64-bit platforms (depending on alignment and whether `type` is `uint32_t` or `uint8_t`).
+> **Typical size:** ~32 bytes on 64-bit — unchanged from the original v0.1 layout. On the backend path (`type == A_BACKEND`), `u.backend = { vtable*, data* }` occupies 16 bytes of the same union; the remaining 8 bytes are unused padding.
 
 ---
 
 ## 4. Layout Guarantees (ABI Stability)
 
-- `AVar` (universal handle) is a standard-layout struct: two machine words (16 bytes on 64-bit). Its layout is fixed and C ABI stable.
-- `AVarNative` (default backend internal type) uses standard C layout rules under `extern "C"`. It is a **standard-layout type** with the same ABI as the original `AVar` struct from v0.1.
-- For maximum skinny/embedded use, `AVarNative` implementations MAY define `AVarType` as `uint8_t` and apply packing (`#pragma pack(8)` or `__attribute__((packed))`).
-- **Never** access `_backend` or `_storage` on `AVar` directly. Never access `u` members of `AVarNative` unless the `type` field matches. Always use helper functions.
+- `AVar` is a standard-layout struct under `extern "C"`. Its layout is unchanged from the original v0.1 `AVar` struct — no fields added, no fields moved.
+- `AVarNative` is a typedef alias for `AVar`; there is only one struct.
+- For maximum skinny/embedded use, implementations MAY define `AVarType` as `uint8_t` and apply packing (`#pragma pack(8)` or `__attribute__((packed))`).
+- **Never** access `u` members directly unless `v->type` matches the intended member and `v->type != A_BACKEND`. Always use helper functions.
 
 ---
 
@@ -366,13 +380,11 @@ graph TD
 
 ## 6. Recommended Helper API (C Layer)
 
-All functions dispatch through the `_backend` vtable. When `_backend` is `NULL` (zero-initialised `AVar`), `AVAR_DEFAULT_BACKEND` is selected automatically — **existing call sites require no changes.**
+All functions branch on `v->type != A_BACKEND`. The native path is inline with no overhead; the backend path dispatches through `v->u.backend.vtable`. **Existing call sites require no changes** — `AVar v = {0}` is a valid native null.
 
 ```c
 /* ── Initialization ───────────────────────────────────────────────────── */
-void a_var_init_null(AVar* v);               /* uses AVAR_DEFAULT_BACKEND  */
-void a_var_init_with_backend(AVar* v,
-                             const ABackend* backend); /* explicit opt-in  */
+void a_var_init_null(AVar* v);          /* sets type = A_NULL; same as {0} */
 
 /* ── Scalar setters ───────────────────────────────────────────────────── */
 void a_var_set_bool  (AVar* v, bool value);
@@ -399,23 +411,26 @@ AVar a_var_copy (const AVar* src);   /* deep copy, same backend            */
 AVar a_var_convert(const AVar* src, const ABackend* dst_backend);
 ```
 
-**Default backend — no new params needed:**
+**Native path — zero-init, no heap, no vtable:**
 
 ```c
-AVar v;
-a_var_init_null(&v);        /* or simply: AVar v = {0}; */
-a_var_set_i64(&v, 42);
-printf("%lld\n", a_var_as_i64(&v));
+AVar v = {0};                            /* type = A_NULL, valid native null */
+a_var_set_i64(&v, 42);                   /* inline, no malloc               */
+a_var_set_string(&v, "hello", 5, false); /* borrowed, no malloc             */
 a_var_clear(&v);
 ```
 
-**Explicit backend selection (advanced):**
+**Backend path (advanced) — opt in via convert:**
 
 ```c
-AVar v;
-a_var_init_with_backend(&v, &AVAR_CBOR_BACKEND);
-a_var_set_i64(&v, 42);
-a_var_clear(&v);
+AVar native = {0};
+a_var_set_i64(&native, 42);
+
+AVar cbor = a_var_convert(&native, &AVAR_CBOR_BACKEND); /* type = A_BACKEND */
+uint8_t buf[64]; size_t len = sizeof(buf);
+cbor.u.backend.vtable->encode_cbor(&cbor, buf, &len);
+a_var_clear(&cbor);
+a_var_clear(&native);
 ```
 
 Each language binding MUST provide idiomatic equivalents (e.g., `to_variant()`, `from_variant()`).
@@ -427,14 +442,14 @@ Each language binding MUST provide idiomatic equivalents (e.g., `to_variant()`, 
 sequenceDiagram
     participant PY as Python<br/>dict / str / int
     participant BN as Python Binding<br/>to_variant() / from_variant()
-    participant C as Default Backend<br/>AVarNative
+    participant C as AVar native path<br/>(type 0–254)
     participant BN2 as Go Binding<br/>ToVariant() / FromVariant()
     participant GO as Go<br/>map / string / int64
 
     PY->>BN: {"name": "Alice", "score": 95}
-    BN->>C: AVarNative MAP, owned
+    BN->>C: AVar MAP (native), owned
     Note over C: Crosses FFI boundary
-    C->>BN2: AVarNative MAP
+    C->>BN2: AVar MAP (native)
     BN2->>GO: map[string]interface{}
 ```
 
@@ -466,7 +481,7 @@ flowchart TD
 | Cross-language FFI | **AnyVar** via C ABI |
 | Wire protocol / IPC | **AnyVar** → CBOR backend |
 | Configuration files | **AnyVar** → JSON backend |
-| User-defined complex types | **A_CUSTOM** + type registry |
+| User-defined complex types | **A_BACKEND** + custom vtable |
 | Custom wire format | **AnyVar** + custom `ABackend` impl |
 
 ---
@@ -504,7 +519,7 @@ graph TB
         D_TYPE["AVarType: uint32_t"]
         D_ALLOC["Allocation: malloc/free"]
         D_OWN["Ownership: refcount OK"]
-        D_SIZE["Size: ~32 bytes (AVarNative)"]
+        D_SIZE["Size: ~32 bytes (AVar)"]
     end
 
     subgraph "Embedded Configuration"
@@ -547,7 +562,7 @@ gantt
     axisFormat %b %Y
 
     section Phase 1: Core C
-    ABackend vtable + native backend :p1a, 2026-05, 2w
+    Type-sentinel AVar + ABackend vtable :p1a, 2026-05, 2w
     Unit tests (scalar types)        :p1b, after p1a, 1w
     Container types (array/map)      :p1c, after p1b, 2w
     Ownership + clear/copy           :p1d, after p1c, 1w
@@ -572,7 +587,7 @@ gantt
 
 | Phase | Deliverables | Dependencies |
 |---|---|---|
-| **1. Core C** | `AVar` handle, `ABackend` vtable, native backend (`AVarNative`), scalar + container types, ownership | None |
+| **1. Core C** | Type-sentinel `AVar` struct, `ABackend` vtable, scalar + container types, ownership | None |
 | **2. Serialization Backends** | CBOR backend, JSON backend | Phase 1 |
 | **3. Bindings** | Python, TypeScript, Go, C++ wrappers | Phase 1 (Phase 2 for serialization tests) |
 | **4. Embedded** | Static allocator, packed layout, RTOS integration | Phase 1 |
@@ -585,7 +600,7 @@ AnyVar is intended to be open source (**MIT/Apache 2.0** recommended).
 
 ---
 
-> This specification is standalone. All language implementations (C/C++, Python, TypeScript, Go, etc.) interact through the universal `AVar` handle and `a_var_*` helper API. Cross-FFI bindings map to/from `AVarNative` for the default backend; alternative backends implement `ABackend` and integrate transparently.
+> This specification is standalone. All language implementations (C/C++, Python, TypeScript, Go, etc.) use the single `AVar` struct and `a_var_*` helper API. On the native path (`type` 0–254) the layout is unchanged from v0.1. Cross-FFI bindings may use `AVarNative` (a typedef alias) for documentation clarity. Alternative formats implement `ABackend` and are entered via `a_var_convert()`.
 >
 > **Next steps:** Formalize `ABackend` vtable contract, provide reference implementations of the native and CBOR backends in C, add alignment/packing examples for embedded targets.
 >
