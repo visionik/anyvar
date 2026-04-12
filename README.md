@@ -6,6 +6,15 @@
 
 ---
 
+## Related Documents
+
+| Document | Description |
+|---|---|
+| [docs/c-lib-integration.md](docs/c-lib-integration.md) | How to build and link the C library; binding strategies for 30+ languages including Python, Go, Rust, Node.js, Java, Swift, and WASM |
+| [docs/implementation-thoughts.md](docs/implementation-thoughts.md) | Design analysis comparing four backend architectures; rationale for the type-sentinel approach (`A_BACKEND = 255`) |
+
+---
+
 ## 1. Introduction
 
 AnyVar (`AVar`) is a lightweight, dynamic value type designed for:
