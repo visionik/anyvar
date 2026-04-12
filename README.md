@@ -1,6 +1,6 @@
 # AnyVar Specification
 
-**Version:** 0.4.0 (Draft)
+**Version:** 0.5.0 (Draft)
 **Date:** April 2026
 **Purpose:** A canonical cross-language, C-ABI-compatible tagged union (variant) for any system requiring lightweight dynamic values across language boundaries.
 
@@ -94,10 +94,6 @@ graph TD
         M["MAP<br/>0x81<br/><i>string to AVar</i>"]
     end
 
-    subgraph "Backend Dispatch"
-        C["A_BACKEND<br/>0xFF<br/><i>vtable + data*</i>"]
-    end
-
     AV --> N
     AV --> B
     AV --> I64
@@ -110,7 +106,6 @@ graph TD
     AV --> BN
     AV --> A
     AV --> M
-    AV --> C
 ```
 
 ### Type Tags
@@ -118,30 +113,38 @@ graph TD
 | Tag | Value | C Union Member | Size |
 |---|---|---|---|
 | `A_NULL` | `0x00` | *(none)* | 0 |
-| `A_BOOL` | `0x01` | `bool b` | 1 byte |
+| `A_BOOL` | `0x01` | *(none — value in `A_FLAG_BOOL_VAL`)* | 0 |
 | `A_INT64` | `0x20` | `int64_t i64` | 8 bytes |
 | `A_UINT64` | `0x21` | `uint64_t u64` | 8 bytes |
 | `A_INT32` | `0x22` | `int32_t i32` | 4 bytes |
 | `A_UINT32` | `0x23` | `uint32_t u32` | 4 bytes |
 | `A_DOUBLE` | `0x28` | `double d` | 8 bytes |
 | `A_FLOAT32` | `0x29` | `float f32` | 4 bytes |
-| `A_STRING` | `0x40` | `str { data, len, owned }` | ptr + size_t + bool |
-| `A_BINARY` | `0x41` | `str { data, len, owned }` | ptr + size_t + bool |
+| `A_STRING` | `0x40` | `str { data, len }` (owned in `A_FLAG_OWNED`) | 2 ptrs |
+| `A_BINARY` | `0x41` | `str { data, len }` (owned in `A_FLAG_OWNED`) | 2 ptrs |
 | `A_ARRAY` | `0x80` | `array { items, len }` | ptr + size_t |
 | `A_MAP` | `0x81` | `map { keys, values, len }` | 2 ptrs + size_t |
-| `A_BACKEND` | `0xFF` | `backend { vtable*, data* }` | 2 ptrs |
 
 The upper nibble encodes the category; within each category the low bits encode subtype:
 
 | Category | Mask | Value | Low bits |
 |---|---|---|---|
-| Integer | `type & 0xF8 == 0x20` | 0x20–0x27 | bit 1 = 32-bit, bit 0 = unsigned |
-| Float | `type & 0xF8 == 0x28` | 0x28–0x2F | bit 0 = 32-bit (FLOAT32) |
-| Buffer | `type & 0xF0 == 0x40` | 0x40–0x4F | |
-| Container | `type & 0xF0 == 0x80` | 0x80–0x8F | |
-| Numeric | `type & 0xF0 == 0x20` | 0x20–0x2F | (integer or float) |
+| Integer | `A_BASE_TYPE(t) & 0xF8 == 0x20` | 0x20–0x27 | bit 1 = 32-bit, bit 0 = unsigned |
+| Float | `A_BASE_TYPE(t) & 0xF8 == 0x28` | 0x28–0x2F | bit 0 = 32-bit |
+| Buffer | `A_BASE_TYPE(t) & 0xF0 == 0x40` | 0x40–0x4F | |
+| Container | `A_BASE_TYPE(t) & 0xF0 == 0x80` | 0x80–0x8F | |
+| Numeric | `A_BASE_TYPE(t) & 0xF0 == 0x20` | 0x20–0x2F | integer or float |
 
-> **Note:** `A_BACKEND = 0xFF` supersedes the earlier `A_CUSTOM` sentinel. Custom extension types are simply backends with their own vtable.
+### Type Flags (bits 8–31 of the 32-bit `type` field)
+
+| Flag | Bit | Value | Meaning |
+|---|---|---|---|
+| `A_FLAG_BOOL_VAL` | 8 | `0x00000100` | Bool value (1=true, 0=false) — `A_BOOL` only |
+| `A_FLAG_OWNED` | 9 | `0x00000200` | Buffer data must be freed on clear — `A_STRING`/`A_BINARY` only |
+| `A_FLAG_CONST` | 10 | `0x00000400` | Immutable — safe to share without copy |
+| `A_FLAG_BACKEND` | 31 | `0x80000000` | Backend dispatch mode — `u.backend.vtable` is active |
+
+`A_FLAG_BACKEND` is a **mode bit**, not a base type. It can combine with any flag. Zero-init (`AVar v = {0}`) has no flags set — native `A_NULL`.
 
 ---
 
@@ -149,10 +152,10 @@ The upper nibble encodes the category; within each category the low bits encode 
 
 `AVar` is a **single unified struct** for all paths:
 
-- **Native path** (`type` 0–254) — byte-for-byte identical to the original tagged union layout. No extra fields. No heap allocation for scalars. `v->type` is the first field, readable with a single load and no indirection.
-- **Backend path** (`type == A_BACKEND = 255`) — `u.backend` holds a vtable pointer and opaque data pointer. All `a_var_*` helpers detect this with `__builtin_expect(v->type != A_BACKEND, 1)` so the native path is always the hot inline path.
+- **Native path** (`A_FLAG_BACKEND` clear) — base type in bits 0–7, per-value flags in bits 8–30. No heap allocation for scalars or booleans; bool value and buffer ownership live directly in `type`.
+- **Backend path** (`A_FLAG_BACKEND` set, bit 31) — `u.backend` holds a vtable pointer and opaque data pointer. All `a_var_*` helpers check `A_IS_BACKEND(v->type)` with `__builtin_expect` so the native path is always the hot inline path.
 
-Custom formats (CBOR, JSON, user-defined) are entered explicitly via `a_var_convert()` and are represented as `A_BACKEND` instances. `AVarNative` is retained as a documentation alias (`typedef AVar AVarNative`).
+Custom formats (CBOR, JSON, user-defined) are entered via `a_var_convert()`. `AVarNative` is retained as a documentation alias (`typedef AVar AVarNative`).
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#909090', 'secondaryColor': '#808080', 'tertiaryColor': '#707070', 'primaryTextColor': '#000000', 'secondaryTextColor': '#000000', 'tertiaryTextColor': '#000000', 'noteTextColor': '#000000', 'lineColor': '#404040' }}}%%
@@ -164,57 +167,66 @@ graph TB
         API["a_var_* helpers<br/>branch on v->type != A_BACKEND"]
     end
     subgraph "Dispatch"
-        NB["Native path<br/>type 0–254, fully inline"]
+        NB["Native path<br/>A_FLAG_BACKEND clear"]
         CB["CBOR Backend<br/>AVAR_CBOR_BACKEND"]
         JB["JSON Backend<br/>AVAR_JSON_BACKEND"]
         XB["Custom Backend<br/>ABackend impl"]
     end
     APP --> API
-    API -->|"type != A_BACKEND (hot path)"| NB
-    API -->|"type == A_BACKEND"| CB
-    API -->|"type == A_BACKEND"| JB
-    API -->|"type == A_BACKEND"| XB
+    API -->|"!A_IS_BACKEND (hot path)"| NB
+    API -->|"A_IS_BACKEND"| CB
+    API -->|"A_IS_BACKEND"| JB
+    API -->|"A_IS_BACKEND"| XB
 ```
 
 ```c
 typedef enum AVarType {
     A_NULL      = 0x00,   /* zero-init: AVar v = {0} is a valid null      */
-    A_BOOL      = 0x01,
+    A_BOOL      = 0x01,   /* value encoded in A_FLAG_BOOL_VAL (bit 8)     */
 
-    /* integers  ── (type & 0xF8) == 0x20  ───────────────────────────── */
+    /* integers  ── (A_BASE_TYPE & 0xF8) == 0x20 ────────────────────── */
     /*   bit 1: width   (0 = 64-bit,    1 = 32-bit)                      */
     /*   bit 0: sign    (0 = signed,    1 = unsigned)                    */
-    A_INT64     = 0x20,   /* 64-bit signed                               */
-    A_UINT64    = 0x21,   /* 64-bit unsigned                             */
-    A_INT32     = 0x22,   /* 32-bit signed                               */
-    A_UINT32    = 0x23,   /* 32-bit unsigned                             */
+    A_INT64     = 0x20,
+    A_UINT64    = 0x21,
+    A_INT32     = 0x22,
+    A_UINT32    = 0x23,
 
-    /* floats    ── (type & 0xF8) == 0x28  ───────────────────────────── */
+    /* floats    ── (A_BASE_TYPE & 0xF8) == 0x28 ────────────────────── */
     /*   bit 0: width   (0 = 64-bit,    1 = 32-bit)                      */
-    A_DOUBLE    = 0x28,   /* IEEE 754 double (64-bit)                    */
-    A_FLOAT32   = 0x29,   /* IEEE 754 single (32-bit)                    */
+    A_DOUBLE    = 0x28,
+    A_FLOAT32   = 0x29,
 
-    /* buffers   ── (type & 0xF0) == 0x40  ───────────────────────────── */
-    A_STRING    = 0x40,   /* UTF-8 text                                  */
-    A_BINARY    = 0x41,   /* arbitrary bytes                             */
+    /* buffers   ── (A_BASE_TYPE & 0xF0) == 0x40 ────────────────────── */
+    A_STRING    = 0x40,   /* owned flag in A_FLAG_OWNED (bit 9)           */
+    A_BINARY    = 0x41,   /* owned flag in A_FLAG_OWNED (bit 9)           */
 
-    /* containers── (type & 0xF0) == 0x80  ───────────────────────────── */
+    /* containers── (A_BASE_TYPE & 0xF0) == 0x80 ────────────────────── */
     A_ARRAY     = 0x80,
     A_MAP       = 0x81,
 
-    /* 0x02–0x1F, 0x24–0x27, 0x2A–0x3F, 0x42–0x7F, 0x82–0xFE reserved  */
-    A_BACKEND   = 0xFF    /* sentinel: u.backend.{vtable, data}          */
+    /* 0x02–0x1F, 0x24–0x27, 0x2A–0x3F, 0x42–0x7F, 0x82–0xFF reserved   */
 } AVarType;
 
-/* ── Category checks — all single bitwise operations ─────────────────── */
-#define A_IS_NUMERIC(t)   (((unsigned)(t) & 0xF0u) == 0x20u) /* int or float */
-#define A_IS_INTEGER(t)   (((unsigned)(t) & 0xF8u) == 0x20u) /* 0x20–0x27    */
-#define A_IS_FLOAT(t)     (((unsigned)(t) & 0xF8u) == 0x28u) /* 0x28–0x2F    */
-#define A_IS_BUFFER(t)    (((unsigned)(t) & 0xF0u) == 0x40u) /* 0x40–0x4F    */
-#define A_IS_CONTAINER(t) (((unsigned)(t) & 0xF0u) == 0x80u) /* 0x80–0x8F    */
+/* ── Type flags (bits 8–31 of the 32-bit type field) ────────────────── */
+#define A_FLAG_BOOL_VAL  0x00000100u  /* bit  8: bool value (BOOL only)    */
+#define A_FLAG_OWNED     0x00000200u  /* bit  9: free data on clear        */
+#define A_FLAG_CONST     0x00000400u  /* bit 10: immutable, safe to share  */
+#define A_FLAG_BACKEND   0x80000000u  /* bit 31: dispatch via u.backend    */
+
+/* ── Base type extraction ───────────────────────────────────────────────────── */
+#define A_BASE_TYPE(t)    ((AVarType)((unsigned)(t) & 0xFFu))
+#define A_IS_BACKEND(t)   ((unsigned)(t) & A_FLAG_BACKEND)
+
+/* ── Category checks (operate on base type; all single bitwise ops) ──── */
+#define A_IS_NUMERIC(t)   ((A_BASE_TYPE(t) & 0xF0u) == 0x20u)
+#define A_IS_INTEGER(t)   ((A_BASE_TYPE(t) & 0xF8u) == 0x20u)
+#define A_IS_FLOAT(t)     ((A_BASE_TYPE(t) & 0xF8u) == 0x28u)
+#define A_IS_BUFFER(t)    ((A_BASE_TYPE(t) & 0xF0u) == 0x40u)
+#define A_IS_CONTAINER(t) ((A_BASE_TYPE(t) & 0xF0u) == 0x80u)
 /* Within integer category: */
-#define A_IS_UNSIGNED(t)  (A_IS_INTEGER(t) && ((unsigned)(t) & 0x01u))
-#define A_IS_32BIT_INT(t) (A_IS_INTEGER(t) && ((unsigned)(t) & 0x02u))
+#define A_IS_UNSIGNED(t)  (A_IS_INTEGER(t) && (A_BASE_TYPE(t) & 0x01u))
+#define A_IS_32BIT_INT(t) (A_IS_INTEGER(t) && (A_BASE_TYPE(t) & 0x02u))
 ```
 
 ### 3.1 The AVar Struct
@@ -222,12 +234,16 @@ typedef enum AVarType {
 ```c
 /* AVar — single unified type for native and backend paths.
  *
- * Native path (type 0–254):
- *   Byte-for-byte identical to the original v0.1 tagged union.
- *   Zero-init is a valid native null:  AVar v = {0};  →  type = A_NULL
+ * Native path  (A_FLAG_BACKEND clear):
+ *   Bits 0–7:  base type (AVarType enum)
+ *   Bit  8:    bool value (A_BOOL only)
+ *   Bit  9:    owned flag (A_STRING / A_BINARY only)
+ *   Bit  10:   const flag (any type)
+ *   Zero-init is a valid native null:  AVar v = {0};  →  A_NULL
  *
- * Backend path (type == A_BACKEND):
+ * Backend path (A_FLAG_BACKEND set, bit 31):
  *   u.backend.{vtable, data} dispatch all operations.
+ */
  */
 typedef struct AVar AVar;
 typedef struct ABackend ABackend;
@@ -236,8 +252,8 @@ struct AVar {
     AVarType type;        /* first field — always readable, zero indirection  */
 
     union {
-        /* ── Native path ─────────────────────────────────────────────── */
-        bool     b;                                       /* A_BOOL          */
+        /* ── Native path (A_FLAG_BACKEND clear) ───────────────────────── */
+        /* A_BOOL: no slot — value is (type & A_FLAG_BOOL_VAL) >> 8        */
         int64_t  i64;                                     /* A_INT64         */
         uint64_t u64;                                     /* A_UINT64        */
         int32_t  i32;                                     /* A_INT32         */
@@ -246,9 +262,8 @@ struct AVar {
         float    f32;                                     /* A_FLOAT32       */
 
         struct {                                          /* A_STRING/BINARY */
-            char*  data;
+            char*  data;      /* owned = (type & A_FLAG_OWNED), not here   */
             size_t len;
-            bool   owned;
         } str;
 
         struct {                                          /* A_ARRAY         */
@@ -262,7 +277,7 @@ struct AVar {
             size_t len;
         } map;
 
-        /* ── Backend path: type == A_BACKEND ─────────────────────────── */
+        /* ── Backend path (A_FLAG_BACKEND set, bit 31) ────────────────── */
         struct {
             const ABackend* vtable;
             void*           data;
@@ -271,19 +286,44 @@ struct AVar {
 };
 ```
 
-All `a_var_*` helpers branch on `v->type != A_BACKEND`. The native path is inlined; the backend path is a cold call through the vtable. Never access `u` members directly.
+All `a_var_*` helpers check `A_IS_BACKEND(v->type)`. The native path is inlined; the backend path is a cold call through `u.backend.vtable`. Never access `u` members directly.
 
 **Helper dispatch pattern:**
 
 ```c
 static inline AVarType a_var_type(const AVar* v) {
-    if (__builtin_expect(v->type != A_BACKEND, 1))
-        return v->type;                    /* first field, no indirection */
+    if (__builtin_expect(!A_IS_BACKEND(v->type), 1))
+        return A_BASE_TYPE(v->type);       /* mask flags, return base type */
     return v->u.backend.vtable->get_type(v);
 }
 
+/* Bool value lives in bit 8 of type — no union slot accessed */
+static inline void a_var_set_bool(AVar* v, bool val) {
+    if (__builtin_expect(!A_IS_BACKEND(v->type), 1)) {
+        v->type = A_BOOL | ((unsigned)val << 8);
+        return;
+    }
+    v->u.backend.vtable->set_bool(v, val);
+}
+static inline bool a_var_as_bool(const AVar* v) {
+    if (__builtin_expect(!A_IS_BACKEND(v->type), 1))
+        return (v->type & A_FLAG_BOOL_VAL) != 0;
+    return v->u.backend.vtable->as_bool(v);
+}
+
+/* Owned flag lives in bit 9 of type — no u.str.owned accessed */
+static inline void a_var_clear(AVar* v) {
+    if (__builtin_expect(!A_IS_BACKEND(v->type), 1)) {
+        if (A_IS_BUFFER(v->type) && (v->type & A_FLAG_OWNED))
+            free(v->u.str.data);
+        v->type = A_NULL;
+        return;
+    }
+    v->u.backend.vtable->clear(v);
+}
+
 static inline void a_var_set_i64(AVar* v, int64_t val) {
-    if (__builtin_expect(v->type != A_BACKEND, 1)) {
+    if (__builtin_expect(!A_IS_BACKEND(v->type), 1)) {
         v->type  = A_INT64;
         v->u.i64 = val;
         return;
@@ -374,7 +414,7 @@ packet-beta
   24-31: "union member 3 (8B)"
 ```
 
-> **Typical size:** ~32 bytes on 64-bit — unchanged from the original v0.1 layout. On the backend path (`type == A_BACKEND`), `u.backend = { vtable*, data* }` occupies 16 bytes of the same union; the remaining 8 bytes are unused padding.
+> **Typical size:** ~32 bytes on 64-bit. `bool b` and `bool owned` are removed from the union; their values live in the `type` word. On the backend path (`A_FLAG_BACKEND` set), `u.backend = { vtable*, data* }` occupies 16 bytes of the union.
 
 ---
 
@@ -383,7 +423,7 @@ packet-beta
 - `AVar` is a standard-layout struct under `extern "C"`. Its layout is unchanged from the original v0.1 `AVar` struct — no fields added, no fields moved.
 - `AVarNative` is a typedef alias for `AVar`; there is only one struct.
 - For maximum skinny/embedded use, implementations MAY define `AVarType` as `uint8_t` and apply packing (`#pragma pack(8)` or `__attribute__((packed))`).
-- **Never** access `u` members directly unless `v->type` matches the intended member and `v->type != A_BACKEND`. Always use helper functions.
+- **Never** access `u` members directly unless `A_IS_BACKEND(v->type)` is false and `A_BASE_TYPE(v->type)` matches the intended member. Always use helper functions.
 
 ---
 
@@ -417,7 +457,7 @@ stateDiagram-v2
 
 ### Rules
 
-1. The `owned` flag (in `str`) indicates whether the memory pointed to by `data` should be freed when the variant is destroyed.
+1. The `A_FLAG_OWNED` flag (bit 9 of `type`) indicates whether the buffer pointed to by `u.str.data` should be freed when the variant is destroyed. It is not stored in the union.
 2. For `array` and `map`: ownership is **recursive** — the container owns its child `AVar` items.
 3. Default creation from native data SHOULD set `owned = false` (borrow semantics) unless the caller explicitly requests a copy.
 4. Destruction function: `a_var_clear(AVar* v)` MUST free memory only when `owned == true` (or recursively for containers).
@@ -452,7 +492,7 @@ graph TD
 
 ## 6. Recommended Helper API (C Layer)
 
-All functions branch on `v->type != A_BACKEND`. The native path is inline with no overhead; the backend path dispatches through `v->u.backend.vtable`. **Existing call sites require no changes** — `AVar v = {0}` is a valid native null.
+All functions check `A_IS_BACKEND(v->type)`. The native path is inline with no overhead; the backend path dispatches through `u.backend.vtable`. **Existing call sites require no changes** — `AVar v = {0}` is a valid native null.
 
 ```c
 /* ── Initialization ───────────────────────────────────────────────────── */
@@ -680,7 +720,7 @@ AnyVar is intended to be open source (**MIT/Apache 2.0** recommended).
 
 ---
 
-> This specification is standalone. All language implementations (C/C++, Python, TypeScript, Go, etc.) use the single `AVar` struct and `a_var_*` helper API. On the native path (`type` 0–254) the layout is unchanged from v0.1. Cross-FFI bindings may use `AVarNative` (a typedef alias) for documentation clarity. Alternative formats implement `ABackend` and are entered via `a_var_convert()`.
+> This specification is standalone. All language implementations (C/C++, Python, TypeScript, Go, etc.) use the single `AVar` struct and `a_var_*` helper API. The 32-bit `type` field encodes base type (bits 0–7), per-value flags (bits 8–30), and backend mode (bit 31). Cross-FFI bindings may use `AVarNative` (a typedef alias) for documentation clarity. Alternative formats implement `ABackend` and are entered via `a_var_convert()`.
 >
 > **Next steps:** Formalize `ABackend` vtable contract, provide reference implementations of the native and CBOR backends in C, add alignment/packing examples for embedded targets.
 >
