@@ -1,6 +1,6 @@
 # AnyVar Specification
 
-**Version:** 0.3.0 (Draft)
+**Version:** 0.4.0 (Draft)
 **Date:** April 2026
 **Purpose:** A canonical cross-language, C-ABI-compatible tagged union (variant) for any system requiring lightweight dynamic values across language boundaries.
 
@@ -69,32 +69,43 @@ graph TB
 %%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#909090', 'secondaryColor': '#808080', 'tertiaryColor': '#707070', 'primaryTextColor': '#000000', 'secondaryTextColor': '#000000', 'tertiaryTextColor': '#000000', 'noteTextColor': '#000000', 'lineColor': '#404040' }}}%%
 graph TD
     AV["AVar<br/><i>tagged union</i>"]
+    N["NULL<br/>0x00"]
+    B["BOOL<br/>0x01"]
 
-    subgraph "Scalar Types"
-        N["NULL<br/>0"]
-        B["BOOL<br/>1"]
-        I["INT64<br/>2"]
-        D["DOUBLE<br/>3"]
+    subgraph "Integer Types  (0x20–0x27)"
+        I64["INT64<br/>0x20"]
+        U64["UINT64<br/>0x21"]
+        I32["INT32<br/>0x22"]
+        U32["UINT32<br/>0x23"]
     end
 
-    subgraph "Buffer Types"
-        S["STRING<br/>4<br/><i>UTF-8</i>"]
-        BN["BINARY<br/>5<br/><i>arbitrary bytes</i>"]
+    subgraph "Float Types  (0x28–0x2F)"
+        DBL["DOUBLE<br/>0x28"]
+        F32["FLOAT32<br/>0x29"]
     end
 
-    subgraph "Container Types"
-        A["ARRAY<br/>6<br/><i>AVar[]</i>"]
-        M["MAP<br/>7<br/><i>string to AVar</i>"]
+    subgraph "Buffer Types  (0x40–0x4F)"
+        S["STRING<br/>0x40<br/><i>UTF-8</i>"]
+        BN["BINARY<br/>0x41<br/><i>arbitrary bytes</i>"]
+    end
+
+    subgraph "Container Types  (0x80–0x8F)"
+        A["ARRAY<br/>0x80<br/><i>AVar[]</i>"]
+        M["MAP<br/>0x81<br/><i>string to AVar</i>"]
     end
 
     subgraph "Backend Dispatch"
-        C["A_BACKEND<br/>255<br/><i>vtable + data*</i>"]
+        C["A_BACKEND<br/>0xFF<br/><i>vtable + data*</i>"]
     end
 
     AV --> N
     AV --> B
-    AV --> I
-    AV --> D
+    AV --> I64
+    AV --> U64
+    AV --> I32
+    AV --> U32
+    AV --> DBL
+    AV --> F32
     AV --> S
     AV --> BN
     AV --> A
@@ -104,19 +115,33 @@ graph TD
 
 ### Type Tags
 
-| Tag | Name | Value | C Union Member | Size |
-|---|---|---|---|---|
-| `A_NULL` | No value | `0` | *(none)* | 0 |
-| `A_BOOL` | Boolean | `1` | `bool b` | 1 byte |
-| `A_INT64` | 64-bit integer | `2` | `int64_t i64` | 8 bytes |
-| `A_DOUBLE` | 64-bit float | `3` | `double d` | 8 bytes |
-| `A_STRING` | UTF-8 text | `4` | `str { data, len, owned }` | ptr + size_t + bool |
-| `A_BINARY` | Byte buffer | `5` | `str { data, len, owned }` | ptr + size_t + bool |
-| `A_ARRAY` | Variant array | `6` | `array { items, len }` | ptr + size_t |
-| `A_MAP` | String→Variant map | `7` | `map { keys, values, len }` | 2 ptrs + size_t |
-| `A_BACKEND` | Backend dispatch | `255` | `backend { vtable*, data* }` | 2 ptrs |
+| Tag | Value | C Union Member | Size |
+|---|---|---|---|
+| `A_NULL` | `0x00` | *(none)* | 0 |
+| `A_BOOL` | `0x01` | `bool b` | 1 byte |
+| `A_INT64` | `0x20` | `int64_t i64` | 8 bytes |
+| `A_UINT64` | `0x21` | `uint64_t u64` | 8 bytes |
+| `A_INT32` | `0x22` | `int32_t i32` | 4 bytes |
+| `A_UINT32` | `0x23` | `uint32_t u32` | 4 bytes |
+| `A_DOUBLE` | `0x28` | `double d` | 8 bytes |
+| `A_FLOAT32` | `0x29` | `float f32` | 4 bytes |
+| `A_STRING` | `0x40` | `str { data, len, owned }` | ptr + size_t + bool |
+| `A_BINARY` | `0x41` | `str { data, len, owned }` | ptr + size_t + bool |
+| `A_ARRAY` | `0x80` | `array { items, len }` | ptr + size_t |
+| `A_MAP` | `0x81` | `map { keys, values, len }` | 2 ptrs + size_t |
+| `A_BACKEND` | `0xFF` | `backend { vtable*, data* }` | 2 ptrs |
 
-> **Note:** `A_BACKEND` supersedes the earlier `A_CUSTOM` sentinel. Custom extension types are simply backends with their own vtable — `A_BACKEND` is the one extension mechanism.
+The upper nibble encodes the category; within each category the low bits encode subtype:
+
+| Category | Mask | Value | Low bits |
+|---|---|---|---|
+| Integer | `type & 0xF8 == 0x20` | 0x20–0x27 | bit 1 = 32-bit, bit 0 = unsigned |
+| Float | `type & 0xF8 == 0x28` | 0x28–0x2F | bit 0 = 32-bit (FLOAT32) |
+| Buffer | `type & 0xF0 == 0x40` | 0x40–0x4F | |
+| Container | `type & 0xF0 == 0x80` | 0x80–0x8F | |
+| Numeric | `type & 0xF0 == 0x20` | 0x20–0x2F | (integer or float) |
+
+> **Note:** `A_BACKEND = 0xFF` supersedes the earlier `A_CUSTOM` sentinel. Custom extension types are simply backends with their own vtable.
 
 ---
 
@@ -153,17 +178,43 @@ graph TB
 
 ```c
 typedef enum AVarType {
-    A_NULL    = 0,
-    A_BOOL    = 1,
-    A_INT64   = 2,
-    A_DOUBLE  = 3,
-    A_STRING  = 4,     /* UTF-8 encoded text                          */
-    A_BINARY  = 5,     /* arbitrary byte buffer                        */
-    A_ARRAY   = 6,     /* array of AVar                               */
-    A_MAP     = 7,     /* string keys → AVar values                   */
-    /* 8–254 reserved for future native types */
-    A_BACKEND = 255    /* backend dispatch: u.backend.{vtable, data}  */
+    A_NULL      = 0x00,   /* zero-init: AVar v = {0} is a valid null      */
+    A_BOOL      = 0x01,
+
+    /* integers  ── (type & 0xF8) == 0x20  ───────────────────────────── */
+    /*   bit 1: width   (0 = 64-bit,    1 = 32-bit)                      */
+    /*   bit 0: sign    (0 = signed,    1 = unsigned)                    */
+    A_INT64     = 0x20,   /* 64-bit signed                               */
+    A_UINT64    = 0x21,   /* 64-bit unsigned                             */
+    A_INT32     = 0x22,   /* 32-bit signed                               */
+    A_UINT32    = 0x23,   /* 32-bit unsigned                             */
+
+    /* floats    ── (type & 0xF8) == 0x28  ───────────────────────────── */
+    /*   bit 0: width   (0 = 64-bit,    1 = 32-bit)                      */
+    A_DOUBLE    = 0x28,   /* IEEE 754 double (64-bit)                    */
+    A_FLOAT32   = 0x29,   /* IEEE 754 single (32-bit)                    */
+
+    /* buffers   ── (type & 0xF0) == 0x40  ───────────────────────────── */
+    A_STRING    = 0x40,   /* UTF-8 text                                  */
+    A_BINARY    = 0x41,   /* arbitrary bytes                             */
+
+    /* containers── (type & 0xF0) == 0x80  ───────────────────────────── */
+    A_ARRAY     = 0x80,
+    A_MAP       = 0x81,
+
+    /* 0x02–0x1F, 0x24–0x27, 0x2A–0x3F, 0x42–0x7F, 0x82–0xFE reserved  */
+    A_BACKEND   = 0xFF    /* sentinel: u.backend.{vtable, data}          */
 } AVarType;
+
+/* ── Category checks — all single bitwise operations ─────────────────── */
+#define A_IS_NUMERIC(t)   (((unsigned)(t) & 0xF0u) == 0x20u) /* int or float */
+#define A_IS_INTEGER(t)   (((unsigned)(t) & 0xF8u) == 0x20u) /* 0x20–0x27    */
+#define A_IS_FLOAT(t)     (((unsigned)(t) & 0xF8u) == 0x28u) /* 0x28–0x2F    */
+#define A_IS_BUFFER(t)    (((unsigned)(t) & 0xF0u) == 0x40u) /* 0x40–0x4F    */
+#define A_IS_CONTAINER(t) (((unsigned)(t) & 0xF0u) == 0x80u) /* 0x80–0x8F    */
+/* Within integer category: */
+#define A_IS_UNSIGNED(t)  (A_IS_INTEGER(t) && ((unsigned)(t) & 0x01u))
+#define A_IS_32BIT_INT(t) (A_IS_INTEGER(t) && ((unsigned)(t) & 0x02u))
 ```
 
 ### 3.1 The AVar Struct
@@ -185,10 +236,14 @@ struct AVar {
     AVarType type;        /* first field — always readable, zero indirection  */
 
     union {
-        /* ── Native path: type 0–254 ──────────────────────────────────── */
-        bool    b;                                        /* A_BOOL          */
-        int64_t i64;                                      /* A_INT64         */
-        double  d;                                        /* A_DOUBLE        */
+        /* ── Native path ─────────────────────────────────────────────── */
+        bool     b;                                       /* A_BOOL          */
+        int64_t  i64;                                     /* A_INT64         */
+        uint64_t u64;                                     /* A_UINT64        */
+        int32_t  i32;                                     /* A_INT32         */
+        uint32_t u32;                                     /* A_UINT32        */
+        double   d;                                       /* A_DOUBLE        */
+        float    f32;                                     /* A_FLOAT32       */
 
         struct {                                          /* A_STRING/BINARY */
             char*  data;
@@ -250,19 +305,27 @@ typedef struct ABackend {
     AVarType    (*get_type)    (const AVar* v);
 
     /* scalar readers */
-    bool        (*as_bool)     (const AVar* v);
-    int64_t     (*as_i64)      (const AVar* v);
-    double      (*as_double)   (const AVar* v);
-    const char* (*as_string)   (const AVar* v, size_t* out_len);
-    const void* (*as_binary)   (const AVar* v, size_t* out_len);
+    bool        (*as_bool)    (const AVar* v);
+    int64_t     (*as_i64)     (const AVar* v);
+    uint64_t    (*as_u64)     (const AVar* v);
+    int32_t     (*as_i32)     (const AVar* v);
+    uint32_t    (*as_u32)     (const AVar* v);
+    double      (*as_double)  (const AVar* v);
+    float       (*as_float32) (const AVar* v);
+    const char* (*as_string)  (const AVar* v, size_t* out_len);
+    const void* (*as_binary)  (const AVar* v, size_t* out_len);
 
     /* scalar writers */
-    void (*set_null)   (AVar* v);
-    void (*set_bool)   (AVar* v, bool val);
-    void (*set_i64)    (AVar* v, int64_t val);
-    void (*set_double) (AVar* v, double val);
-    void (*set_string) (AVar* v, const char* s, size_t len, bool copy);
-    void (*set_binary) (AVar* v, const void* data, size_t len, bool copy);
+    void (*set_null)    (AVar* v);
+    void (*set_bool)    (AVar* v, bool val);
+    void (*set_i64)     (AVar* v, int64_t  val);
+    void (*set_u64)     (AVar* v, uint64_t val);
+    void (*set_i32)     (AVar* v, int32_t  val);
+    void (*set_u32)     (AVar* v, uint32_t val);
+    void (*set_double)  (AVar* v, double val);
+    void (*set_float32) (AVar* v, float  val);
+    void (*set_string)  (AVar* v, const char* s, size_t len, bool copy);
+    void (*set_binary)  (AVar* v, const void* data, size_t len, bool copy);
 
     /* container readers */
     size_t (*array_len) (const AVar* v);
@@ -396,21 +459,29 @@ All functions branch on `v->type != A_BACKEND`. The native path is inline with n
 void a_var_init_null(AVar* v);          /* sets type = A_NULL; same as {0} */
 
 /* ── Scalar setters ───────────────────────────────────────────────────── */
-void a_var_set_bool  (AVar* v, bool value);
-void a_var_set_i64   (AVar* v, int64_t value);
-void a_var_set_double(AVar* v, double value);
+void a_var_set_bool   (AVar* v, bool value);
+void a_var_set_i64    (AVar* v, int64_t  value);
+void a_var_set_u64    (AVar* v, uint64_t value);
+void a_var_set_i32    (AVar* v, int32_t  value);
+void a_var_set_u32    (AVar* v, uint32_t value);
+void a_var_set_double (AVar* v, double value);
+void a_var_set_float32(AVar* v, float  value);
 
 /* Buffer setters (copy=true → owned, copy=false → borrowed) */
 void a_var_set_string(AVar* v, const char* str, bool copy);
 void a_var_set_binary(AVar* v, const void* data, size_t len, bool copy);
 
 /* ── Scalar readers ───────────────────────────────────────────────────── */
-AVarType    a_var_type     (const AVar* v);
-bool        a_var_as_bool  (const AVar* v);
-int64_t     a_var_as_i64   (const AVar* v);
-double      a_var_as_double(const AVar* v);
-const char* a_var_as_string(const AVar* v, size_t* out_len); /* UTF-8 */
-const void* a_var_as_binary(const AVar* v, size_t* out_len);
+AVarType    a_var_type      (const AVar* v);
+bool        a_var_as_bool   (const AVar* v);
+int64_t     a_var_as_i64    (const AVar* v);
+uint64_t    a_var_as_u64    (const AVar* v);
+int32_t     a_var_as_i32    (const AVar* v);
+uint32_t    a_var_as_u32    (const AVar* v);
+double      a_var_as_double (const AVar* v);
+float       a_var_as_float32(const AVar* v);
+const char* a_var_as_string (const AVar* v, size_t* out_len); /* UTF-8 */
+const void* a_var_as_binary (const AVar* v, size_t* out_len);
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
 void a_var_clear(AVar* v);           /* reset + free owned resources       */
