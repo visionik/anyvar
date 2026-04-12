@@ -360,16 +360,75 @@ a_var_clear(&cbor);
 
 ---
 
+## Sentinel Value: Why 255 and Not 0 or 1
+
+Once the type-sentinel approach is chosen, the natural question is whether a low sentinel value (0 or 1) would be faster than 255 at the instruction level.
+
+### The ARM64 Argument for 0
+
+On ARM64, comparing to zero has a dedicated fused compare-and-branch instruction:
+
+```asm
+; sentinel = 255: two instructions
+ldrb  w0, [x0]          ; load type byte
+cmp   w0, #255
+bne   .native
+
+; sentinel = 0: one fused instruction
+ldrb  w0, [x0]          ; load type byte
+cbnz  w0, .native       ; compare-and-branch-if-nonzero, fused
+```
+
+On x86-64 the equivalent is `test reg, reg` + `jnz` vs `cmp reg, 255` + `jne` — again one instruction shorter for the zero case.
+
+### Why It Doesn't Matter
+
+`__builtin_expect(v->type != A_BACKEND, 1)` marks the branch as almost-always-not-taken (i.e. almost always native). On a modern out-of-order CPU the branch predictor learns this within a handful of iterations and the misprediction cost approaches zero regardless of the sentinel value. The one saved instruction on ARM64 is never in the critical path.
+
+The real performance wins from type-sentinel are:
+1. ~32B inline struct vs ~48B + malloc in always-backend
+2. Zero heap allocations on the native path
+3. Cache-coherent array traversal (3,200B contiguous vs 4,800B + pointer-chasing)
+
+Compared to those, one instruction in a predicted branch is noise.
+
+### The Cost of Using 0 as Sentinel
+
+Using 0 as the backend sentinel would break the single most valuable ergonomic property of the design:
+
+```c
+AVar v = {0};   /* sentinel=255: valid native A_NULL — correct  */
+AVar v = {0};   /* sentinel=0:   type=0=A_BACKEND — WRONG, dangerous */
+```
+
+With 0 as the sentinel, every declaration requires explicit initialization:
+
+```c
+AVar v;
+a_var_init_null(&v);   /* required — zero-init is now invalid */
+```
+
+This adds friction at every call site and introduces a class of bugs (uninitialized `AVar` silently treated as backend-dispatched) that are hard to catch.
+
+`A_NULL = 0` also follows the universal C convention of zero meaning "nothing" / "false" / "uninitialized". Abandoning this for one instruction saving is not a good trade.
+
+### Verdict
+
+**Use 255.** Keep `A_NULL = 0`, keep `AVar v = {0}` as valid zero-init. The sentinel value choice has no measurable performance impact under branch prediction.
+
+---
+
 ## Recommendation
 
-The **type-sentinel** approach is the right design for AnyVar:
+The **type-sentinel** approach with `A_BACKEND = 255` is the right design for AnyVar:
 
 1. **`AVar` is byte-for-byte `AVarNative` on the native path** — zero extra fields, zero overhead
 2. **`v->type` is the first field** — always readable with a single load, no nesting, no branch
 3. **Tightest collection layout** — ~32B per element, fully inline, best cache behaviour of all four approaches
 4. **Single unified type** — no box/unbox API, generic code written once
-5. **`__builtin_expect(v->type != A_BACKEND, 1)`** makes the backend branch a cold out-of-line path
-6. **`A_BACKEND` supersedes `A_CUSTOM`** — custom extension types are just backends with their own vtable; cleaner type system
-7. **Less non-default backend waste** than null-backend (~8B vs ~32B padding when backend is active)
+5. **`__builtin_expect(v->type != A_BACKEND, 1)`** makes the backend branch a cold out-of-line path with negligible cost
+6. **`A_BACKEND = 255` preserves `A_NULL = 0`** — `AVar v = {0}` is a valid native null; zero-init just works
+7. **`A_BACKEND` supersedes `A_CUSTOM`** — custom extension types are just backends with their own vtable; cleaner type system
+8. **Less non-default backend waste** than null-backend (~8B vs ~32B padding when backend is active)
 
 The current v0.2 `always-backend` design should be replaced with type-sentinel. The `AVarNative` typedef can be kept as a documentation alias (`typedef AVar AVarNative`) for FFI binding documentation, but the struct itself only needs to be defined once.
