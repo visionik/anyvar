@@ -9,11 +9,11 @@
 
 How should `AVar` handle the common case (native C struct, no serialization backend) without paying unnecessary overhead, while still supporting pluggable backends (CBOR, JSON, custom) when needed?
 
-Three approaches were identified and compared.
+Four approaches were identified and compared.
 
 ---
 
-## The Three Approaches
+## The Four Approaches
 
 ### 1. Always-Backend (current v0.2)
 
@@ -60,7 +60,7 @@ In practice, the default path heap-allocates for all non-scalar types, and the "
 
 ---
 
-### 3. Null-Backend Fast Path (recommended)
+### 3. Null-Backend Fast Path
 
 `AVar` is a single unified type. `_storage` is sized to hold `AVarNative` inline. When `_backend == NULL`, helper functions operate directly on the native fields. When non-NULL, they dispatch through the vtable.
 
@@ -87,30 +87,123 @@ static inline void a_var_set_i64(AVar* v, int64_t val) {
 }
 ```
 
-**Best when:** Performance on the native path is the priority and a single unified type is preferred. This is the right choice for AnyFlux.
+**Best when:** Performance on the native path is the priority and a single unified type is preferred. Superseded by approach 4 below, but a valid intermediate step.
 
 ---
 
-## Detailed Comparison: Always-Backend vs Null-Backend
+### 4. Type-Sentinel (recommended)
+
+Reserve one `AVarType` value (255) as a sentinel meaning "this instance dispatches via a backend". No extra field is added — the `type` field already present in `AVarNative` doubles as the discriminator. On the native path `AVar` is byte-for-byte identical to `AVarNative`.
+
+```c
+typedef enum AVarType {
+    A_NULL    = 0,
+    A_BOOL    = 1,
+    A_INT64   = 2,
+    A_DOUBLE  = 3,
+    A_STRING  = 4,
+    A_BINARY  = 5,
+    A_ARRAY   = 6,
+    A_MAP     = 7,
+    /* 8–254 reserved for future native types */
+    A_BACKEND = 255   /* sentinel: dispatch via u.backend vtable */
+} AVarType;
+
+typedef struct AVar AVar;
+typedef struct ABackend ABackend;
+
+struct AVar {
+    AVarType type;      /* first field — always readable, no indirection   */
+    union {
+        /* native path: type 0–254 */
+        bool    b;
+        int64_t i64;
+        double  d;
+        struct { char* data; size_t len; bool owned; } str;
+        struct { struct AVar* items; size_t len; } array;
+        struct { struct AVar* keys; struct AVar* values; size_t len; } map;
+
+        /* backend path: type == A_BACKEND */
+        struct {
+            const ABackend* vtable;
+            void*           data;
+        } backend;
+    } u;
+};
+```
+
+**Size:** ~32 bytes — identical to `AVarNative`. No extra field whatsoever on native instances.
+
+Helper pattern:
+
+```c
+static inline AVarType a_var_type(const AVar* v) {
+    if (__builtin_expect(v->type != A_BACKEND, 1))
+        return v->type;                          /* direct read, first field */
+    return v->u.backend.vtable->get_type(v);
+}
+
+static inline void a_var_set_i64(AVar* v, int64_t val) {
+    if (__builtin_expect(v->type != A_BACKEND, 1)) {
+        v->type  = A_INT64;
+        v->u.i64 = val;
+        return;
+    }
+    v->u.backend.vtable->set_i64(v, val);
+}
+
+static inline void a_var_clear(AVar* v) {
+    if (__builtin_expect(v->type != A_BACKEND, 1)) {
+        if ((v->type == A_STRING || v->type == A_BINARY) && v->u.str.owned)
+            free(v->u.str.data);
+        v->type = A_NULL;
+        return;
+    }
+    v->u.backend.vtable->clear(v);
+}
+```
+
+Usage is identical to null-backend from the caller's perspective:
+
+```c
+AVar v = {0};                                    /* type = A_NULL, native   */
+a_var_set_i64(&v, 42);                           /* inline, no malloc       */
+a_var_set_string(&v, "hello", 5, false);         /* borrowed, no malloc     */
+a_var_clear(&v);
+
+/* Opt into a backend explicitly */
+AVar cbor = a_var_convert(&v, &AVAR_CBOR_BACKEND);  /* type = A_BACKEND    */
+uint8_t buf[64]; size_t len = sizeof(buf);
+cbor.u.backend.vtable->encode_cbor(&cbor, buf, &len);
+a_var_clear(&cbor);
+```
+
+**Note on `A_CUSTOM`:** The current spec uses `255` for `A_CUSTOM` (opaque pointer extension). With this approach, custom extension types are simply backends with their own vtable — `A_BACKEND` supersedes `A_CUSTOM`. This is more principled: backends are already the extension mechanism, so collapsing both into `A_BACKEND` simplifies the type system rather than adding to it.
+
+**Best when:** Always — this is strictly better than null-backend on every axis for the native path.
+
+---
+
+## Detailed Comparison: Always-Backend vs Null-Backend vs Type-Sentinel
 
 ### The Type Tag Problem
 
 Always-backend has no type tag field in `AVar`. With only 8 bytes of `_storage`, storing both `AVarType` and a 64-bit value is impossible without tricks. In practice the default backend heap-allocates even for scalars.
 
-Null-backend: `_native.type` and `_native.u.i64` are both inline, full 64-bit precision, zero heap allocation.
+Null-backend: `_native.type` is accessible as `v->_storage._native.type` — one level of nesting.
+
+Type-sentinel: `v->type` is the very first field of `AVar` — readable with zero indirection, no branch, no nesting.
 
 ### Per-Value Cost
 
-| Value type | Always-backend | Null-backend |
-|---|---|---|
-| Scalar (int64, double) | 16B header + heap alloc (~32B) ≈ 48B + malloc | 40B inline, no alloc |
-| Borrowed string | 16B header + heap alloc for str struct | 40B inline, no alloc |
-| Owned string | 16B header + heap for str struct + heap for char* | 40B inline + heap for char* only |
-| `a_var_type()` | vtable call or `_buf[0]` decode trick | `_native.type` direct read |
+| Value type | Always-backend | Null-backend | Type-sentinel |
+|---|---|---|---|
+| Scalar (int64, double) | 16B + heap alloc ≈ 48B + malloc | 40B inline, no alloc | 32B inline, no alloc |
+| Borrowed string | 16B + heap alloc for str struct | 40B inline, no alloc | 32B inline, no alloc |
+| Owned string | 16B + heap for str + heap for char* | 40B inline + heap for char* only | 32B inline + heap for char* only |
+| `a_var_type()` | vtable call or `_buf[0]` trick | `_storage._native.type` (nested) | `v->type` (first field, direct) |
 
 ### Array / Collection Access
-
-This is where null-backend wins most decisively.
 
 **Always-backend** — array of 100 `AVar` scalars:
 - 100 × 16B handles = 1,600B headers
@@ -123,30 +216,42 @@ This is where null-backend wins most decisively.
 - Traversal = sequential memory, hardware prefetcher works perfectly
 - Total: 4,000B + 0 `malloc` calls
 
-Despite the larger per-element size, null-backend uses **less total memory** for collections and has far better cache behaviour.
+**Type-sentinel** — same array:
+- 100 × 32B = 3,200B, all contiguous, all values inline
+- Traversal = sequential memory, tightest packing of the three
+- Total: 3,200B + 0 `malloc` calls
+
+Type-sentinel uses the least memory of all three and has the best cache behaviour.
 
 ### Non-Default Backend Overhead
 
-The one area always-backend wins: when using a non-default backend (CBOR, JSON), `_storage._ptr` holds the backend data with no wasted space. With null-backend, the `_native` union member (~32B) sits unused — wasting ~32 bytes per `AVar` on the non-default path.
+Always-backend: `_storage._ptr` holds backend data tightly — no wasted space.
 
-This is acceptable when the non-default path is not the hot path, as is the case in AnyFlux packet flow.
+Null-backend: the `_native` union member (~32B) sits unused when a backend is active — wastes ~32 bytes per instance on the non-default path.
+
+Type-sentinel: `u.backend = { vtable*, data* }` = 16 bytes, which fits within the union (sized to `map` at ~24 bytes). The remaining ~8 bytes of the union are unused padding — waste is ~8 bytes, not ~32 bytes. Better than null-backend on the non-default path too.
+
+All three: acceptable when the non-default path is not the hot path, as is the case in AnyFlux.
 
 ### Summary Table
 
-| | Always-backend | Null-backend |
-|---|---|---|
-| Struct size | 16B | ~40B |
-| Scalar — heap alloc? | Yes (type tag problem) | No |
-| String — heap alloc? | Yes | No (borrowed), one alloc (owned) |
-| Type tag access | Vtable call or encoded trick | Direct field read |
-| Collection cache behaviour | Poor (pointer-chasing) | Good (inline, contiguous) |
-| Total memory for N scalars | ~48N + N mallocs | ~40N, zero mallocs |
-| Non-default backend waste | None | ~32B per AVar unused |
-| API surface | Single `AVar` type | Single `AVar` type |
+| | Always-backend | Null-backend | Type-sentinel |
+|---|---|---|---|
+| Struct size (native) | 16B | ~40B | ~32B |
+| Scalar — heap alloc? | Yes (type tag problem) | No | No |
+| String — heap alloc? | Yes | No (borrowed), one alloc (owned) | No (borrowed), one alloc (owned) |
+| Type tag access | Vtable call or trick | `_storage._native.type` (nested) | `v->type` (first field, direct) |
+| `AVar` == `AVarNative` layout? | No | No | **Yes** |
+| Collection cache behaviour | Poor (pointer-chasing) | Good (inline) | **Best** (tightest, inline) |
+| Total memory for N scalars | ~48N + N mallocs | ~40N, 0 mallocs | **~32N, 0 mallocs** |
+| Non-default backend waste | None | ~32B per instance | ~8B per instance |
+| API surface | Single `AVar` type | Single `AVar` type | Single `AVar` type |
 
 ---
 
 ## Null-Backend: Full Example
+
+> Included for reference. Type-sentinel (below) is the recommended approach.
 
 ```c
 /* ── Type tag ─────────────────────────────────────────────────────────── */
@@ -257,12 +362,14 @@ a_var_clear(&cbor);
 
 ## Recommendation
 
-For AnyVar, the **null-backend fast path** approach is the right design given that:
+The **type-sentinel** approach is the right design for AnyVar:
 
-1. The native/default path is the hot path — performance there matters most
-2. A single unified `AVar` type is strongly preferable for API ergonomics and generic code
-3. The 8-byte `_backend` overhead per element is acceptable at desktop scale
-4. The ~32B waste on non-default backend instances is acceptable since those instances are not in the hot path
-5. `__builtin_expect` makes the null-check effectively free under branch prediction
+1. **`AVar` is byte-for-byte `AVarNative` on the native path** — zero extra fields, zero overhead
+2. **`v->type` is the first field** — always readable with a single load, no nesting, no branch
+3. **Tightest collection layout** — ~32B per element, fully inline, best cache behaviour of all four approaches
+4. **Single unified type** — no box/unbox API, generic code written once
+5. **`__builtin_expect(v->type != A_BACKEND, 1)`** makes the backend branch a cold out-of-line path
+6. **`A_BACKEND` supersedes `A_CUSTOM`** — custom extension types are just backends with their own vtable; cleaner type system
+7. **Less non-default backend waste** than null-backend (~8B vs ~32B padding when backend is active)
 
-The current v0.2 `always-backend` design should be updated to embed `AVarNative` inline in `_storage` rather than using a small 8-byte union, resolving the type-tag problem and eliminating heap allocation on the default path.
+The current v0.2 `always-backend` design should be replaced with type-sentinel. The `AVarNative` typedef can be kept as a documentation alias (`typedef AVar AVarNative`) for FFI binding documentation, but the struct itself only needs to be defined once.
