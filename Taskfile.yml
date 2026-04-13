@@ -6,12 +6,38 @@ set:
   - pipefail
 
 vars:
-  LLVM_BIN: /opt/homebrew/opt/llvm/bin
+  CLANG_FORMAT:
+    sh: |
+      if command -v clang-format >/dev/null 2>&1; then
+        command -v clang-format
+      elif command -v brew >/dev/null 2>&1 && [ -x "$(brew --prefix llvm)/bin/clang-format" ]; then
+        printf '%s\n' "$(brew --prefix llvm)/bin/clang-format"
+      else
+        echo "clang-format not found" >&2
+        exit 1
+      fi
+  CLANG_TIDY:
+    sh: |
+      if command -v clang-tidy >/dev/null 2>&1; then
+        command -v clang-tidy
+      elif command -v brew >/dev/null 2>&1 && [ -x "$(brew --prefix llvm)/bin/clang-tidy" ]; then
+        printf '%s\n' "$(brew --prefix llvm)/bin/clang-tidy"
+      else
+        echo "clang-tidy not found" >&2
+        exit 1
+      fi
+  LLVM_COV:
+    sh: |
+      if command -v llvm-cov >/dev/null 2>&1; then
+        command -v llvm-cov
+      elif command -v brew >/dev/null 2>&1 && [ -x "$(brew --prefix llvm)/bin/llvm-cov" ]; then
+        printf '%s\n' "$(brew --prefix llvm)/bin/llvm-cov"
+      else
+        echo "llvm-cov not found" >&2
+        exit 1
+      fi
   COVERAGE_INFO: build/coverage/anyvar.coverage.info
   FILTERED_COVERAGE_INFO: build/coverage/anyvar.coverage.filtered.info
-
-env:
-  PATH: "{{.LLVM_BIN}}:{{.PATH}}"
 
 tasks:
   default:
@@ -72,7 +98,7 @@ tasks:
         from pathlib import Path
 
         wrapper = Path("build/coverage/llvm-cov-gcov")
-        wrapper.write_text("#!/bin/sh\nexec /opt/homebrew/opt/llvm/bin/llvm-cov gcov \"$@\"\n")
+        wrapper.write_text('#!/bin/sh\nexec "{{.LLVM_COV}}" gcov "$@"\n')
         wrapper.chmod(0o755)
         PY
       - ctest --preset coverage
@@ -109,7 +135,7 @@ tasks:
     desc: Format C sources and tests with clang-format
     cmds:
       - >
-        {{.LLVM_BIN}}/clang-format -i
+        "{{.CLANG_FORMAT}}" -i
         include/anyvar.h
         src/anyvar-internal.h
         src/anyvar-runtime.c
@@ -125,7 +151,7 @@ tasks:
     desc: Verify formatting without modifying files
     cmds:
       - >
-        {{.LLVM_BIN}}/clang-format --dry-run --Werror
+        "{{.CLANG_FORMAT}}" --dry-run --Werror
         include/anyvar.h
         src/anyvar-internal.h
         src/anyvar-runtime.c
@@ -144,7 +170,7 @@ tasks:
       - |
         if command -v xcrun >/dev/null 2>&1; then
           SDKROOT=$(xcrun --show-sdk-path)
-          {{.LLVM_BIN}}/clang-tidy \
+          "{{.CLANG_TIDY}}" \
             -p build/default \
             --extra-arg=-isysroot \
             --extra-arg="$SDKROOT" \
@@ -156,7 +182,7 @@ tasks:
             tests/test-containers.c \
             tests/test-errors.c
         else
-          {{.LLVM_BIN}}/clang-tidy \
+          "{{.CLANG_TIDY}}" \
             -p build/default \
             src/anyvar-runtime.c \
             src/anyvar-containers.c \

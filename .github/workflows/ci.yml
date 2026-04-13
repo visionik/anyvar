@@ -30,6 +30,10 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake lcov llvm ninja
 
+      - name: Add Homebrew LLVM to PATH (macOS)
+        if: runner.os == 'macOS'
+        run: echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
       - name: Install host dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
