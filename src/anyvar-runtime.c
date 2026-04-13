@@ -133,7 +133,7 @@ void avarResetValue(AVar *value)
 
 static int avarAllocateBytes(char **destination, size_t length)
 {
-    if (destination == NULL) {
+    if (!destination) {
         return AVAR_ERR_NULL; /* LCOV_EXCL_LINE */
     }
 

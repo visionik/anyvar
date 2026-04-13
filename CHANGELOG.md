@@ -18,3 +18,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made LLVM tool discovery in the Taskfile portable across macOS and Linux, and updated macOS CI to expose Homebrew LLVM on PATH
 - Updated CI to run pull-request checks for review-base branches, exposed POSIX pthread APIs to non-Windows builds for clang-tidy, and added a Windows-specific verification path to avoid current clang-tidy/MSVC SDK incompatibilities
 - Fixed a cleanup leak in the runtime copy path for invalid map shapes and relaxed float-conversion warnings only for vendored Unity sources to keep Windows CI focused on project code
+- Adjusted the runtime byte-allocation null check to avoid a clang-tidy pointer-conversion warning without changing behavior
