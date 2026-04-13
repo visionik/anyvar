@@ -576,7 +576,8 @@ int avarCopyUnlocked(const AVar *source, AVar *destination)
         for (size_t index = 0u; index < source->u.array.len; ++index) {
             status = aVar_arrayPush(destination, &source->u.array.items[index]);
             if (status != AVAR_OK) {
-                return status; /* LCOV_EXCL_LINE */
+                (void)avarClearUnlocked(destination); /* LCOV_EXCL_LINE */
+                return status;                        /* LCOV_EXCL_LINE */
             }
         }
         return AVAR_OK;
@@ -589,11 +590,13 @@ int avarCopyUnlocked(const AVar *source, AVar *destination)
         for (size_t index = 0u; index < source->u.map.len; ++index) {
             keyString = aVar_asString(&source->u.map.keys[index], &keyLength);
             if (keyString == NULL) {
+                (void)avarClearUnlocked(destination);
                 return AVAR_ERR_TYPE;
             }
             status = aVar_mapSet(destination, keyString, &source->u.map.values[index], true);
             if (status != AVAR_OK) {
-                return status; /* LCOV_EXCL_LINE */
+                (void)avarClearUnlocked(destination); /* LCOV_EXCL_LINE */
+                return status;                        /* LCOV_EXCL_LINE */
             }
         }
         return AVAR_OK;

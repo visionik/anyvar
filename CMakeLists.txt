@@ -87,6 +87,12 @@ install(
 install(FILES include/anyvar.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 if(BUILD_TESTING)
+    if(NOT MSVC)
+        set_source_files_properties(
+            vendor/unity/unity.c
+            PROPERTIES COMPILE_OPTIONS "-Wno-float-conversion"
+        )
+    endif()
     add_executable(
         anyvar-tests
         vendor/unity/unity.c
