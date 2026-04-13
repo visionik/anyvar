@@ -65,6 +65,8 @@ target_compile_definitions(
         $<$<BOOL:${AVAR_NO_THREAD_SAFE}>:A_NO_THREAD_SAFE>
         $<$<BOOL:${AVAR_PACKED}>:A_PACKED>
         $<$<BOOL:${AVAR_NO_MAP}>:A_NO_MAP>
+    PRIVATE
+        $<$<NOT:$<BOOL:${WIN32}>>:_POSIX_C_SOURCE=200809L>
 )
 
 avar_apply_common_flags(anyvar)

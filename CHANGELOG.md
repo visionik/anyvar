@@ -16,3 +16,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated project planning and specification artifacts to reflect the 100% coverage requirement
 - Replaced the draft README specification with project usage, build workflow, and public API documentation
 - Made LLVM tool discovery in the Taskfile portable across macOS and Linux, and updated macOS CI to expose Homebrew LLVM on PATH
+- Updated CI to run pull-request checks for review-base branches, exposed POSIX pthread APIs to non-Windows builds for clang-tidy, and added a Windows-specific verification path to avoid current clang-tidy/MSVC SDK incompatibilities

@@ -168,6 +168,12 @@ tasks:
     deps: [configure]
     cmds:
       - |
+        case "$(uname -s)" in
+          MINGW*|MSYS*|CYGWIN*)
+            printf '%s\n' "Skipping clang-tidy on Windows due to LLVM/MSVC SDK incompatibilities."
+            exit 0
+            ;;
+        esac
         if command -v xcrun >/dev/null 2>&1; then
           SDKROOT=$(xcrun --show-sdk-path)
           "{{.CLANG_TIDY}}" \
@@ -200,6 +206,12 @@ tasks:
       - task lint
       - task test
       - task test:coverage
+
+  check:windows:
+    desc: Run the Windows CI verification set (format, build, and tests)
+    cmds:
+      - task fmt:check
+      - task test
 
   clean:
     desc: Remove build artifacts
