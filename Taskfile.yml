@@ -1,0 +1,181 @@
+version: "3"
+
+set:
+  - errexit
+  - nounset
+  - pipefail
+
+vars:
+  LLVM_BIN: /opt/homebrew/opt/llvm/bin
+  COVERAGE_INFO: build/coverage/anyvar.coverage.info
+  FILTERED_COVERAGE_INFO: build/coverage/anyvar.coverage.filtered.info
+
+env:
+  PATH: "{{.LLVM_BIN}}:{{.PATH}}"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list-all
+
+  configure:
+    desc: Configure the default debug build with CMake presets
+    cmds:
+      - cmake --preset default
+
+  build:
+    desc: Build the C library and test runner
+    deps: [configure]
+    cmds:
+      - cmake --build --preset default
+
+  build:wasm:
+    desc: Build the WASM variant (requires emcmake or an Emscripten toolchain)
+    cmds:
+      - |
+        if command -v emcmake >/dev/null 2>&1; then
+          emcmake cmake -S . -B build/wasm -GNinja -DBUILD_TESTING=OFF
+        else
+          cmake -S . -B build/wasm -GNinja \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/emscripten.cmake
+        fi
+      - cmake --build build/wasm
+
+  build:embedded:
+    desc: Build the embedded variant with no heap, no internal locking, and packed layout
+    cmds:
+      - >
+        cmake -S . -B build/embedded -GNinja
+        -DBUILD_TESTING=OFF
+        -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m.cmake
+        -DAVAR_NO_HEAP=ON
+        -DAVAR_NO_THREAD_SAFE=ON
+        -DAVAR_PACKED=ON
+      - cmake --build build/embedded
+
+  test:
+    desc: Run the Unity test suite
+    deps: [build]
+    cmds:
+      - ctest --preset default
+
+  test:coverage:
+    desc: Build with coverage instrumentation, run tests, and enforce 100% line coverage
+    cmds:
+      - cmake --preset coverage
+      - cmake --build --preset coverage
+      - rm -f build/coverage/*.gcda build/coverage/*.gcno "{{.COVERAGE_INFO}}" "{{.FILTERED_COVERAGE_INFO}}"
+      - |
+        python3 - <<'PY'
+        from pathlib import Path
+
+        wrapper = Path("build/coverage/llvm-cov-gcov")
+        wrapper.write_text("#!/bin/sh\nexec /opt/homebrew/opt/llvm/bin/llvm-cov gcov \"$@\"\n")
+        wrapper.chmod(0o755)
+        PY
+      - ctest --preset coverage
+      - >
+        lcov --capture
+        --directory build/coverage
+        --output-file "{{.COVERAGE_INFO}}"
+        --gcov-tool build/coverage/llvm-cov-gcov
+      - >
+        lcov --extract "{{.COVERAGE_INFO}}"
+        "*/src/*"
+        --output-file "{{.FILTERED_COVERAGE_INFO}}"
+      - lcov --summary "{{.FILTERED_COVERAGE_INFO}}"
+      - |
+        python3 - <<'PY'
+        import re
+        import subprocess
+
+        report = subprocess.check_output(
+            ["lcov", "--summary", "build/coverage/anyvar.coverage.filtered.info"],
+            text=True,
+        )
+        match = re.search(r"lines\.*:\s+([0-9.]+)%", report)
+        if match is None:
+            print(report)
+            raise SystemExit("failed to parse line coverage")
+        lines = float(match.group(1))
+        if lines < 100.0:
+            raise SystemExit(f"line coverage {lines:.2f}% is below 100%")
+        print(f"coverage gate passed: {lines:.2f}%")
+        PY
+
+  fmt:
+    desc: Format C sources and tests with clang-format
+    cmds:
+      - >
+        {{.LLVM_BIN}}/clang-format -i
+        include/anyvar.h
+        src/anyvar-internal.h
+        src/anyvar-runtime.c
+        src/anyvar-containers.c
+        tests/test-suite.h
+        tests/test-main.c
+        tests/test-scalars.c
+        tests/test-buffers.c
+        tests/test-containers.c
+        tests/test-errors.c
+
+  fmt:check:
+    desc: Verify formatting without modifying files
+    cmds:
+      - >
+        {{.LLVM_BIN}}/clang-format --dry-run --Werror
+        include/anyvar.h
+        src/anyvar-internal.h
+        src/anyvar-runtime.c
+        src/anyvar-containers.c
+        tests/test-suite.h
+        tests/test-main.c
+        tests/test-scalars.c
+        tests/test-buffers.c
+        tests/test-containers.c
+        tests/test-errors.c
+
+  lint:
+    desc: Run clang-tidy on the AnyVar source and tests
+    deps: [configure]
+    cmds:
+      - |
+        if command -v xcrun >/dev/null 2>&1; then
+          SDKROOT=$(xcrun --show-sdk-path)
+          {{.LLVM_BIN}}/clang-tidy \
+            -p build/default \
+            --extra-arg=-isysroot \
+            --extra-arg="$SDKROOT" \
+            src/anyvar-runtime.c \
+            src/anyvar-containers.c \
+            tests/test-main.c \
+            tests/test-scalars.c \
+            tests/test-buffers.c \
+            tests/test-containers.c \
+            tests/test-errors.c
+        else
+          {{.LLVM_BIN}}/clang-tidy \
+            -p build/default \
+            src/anyvar-runtime.c \
+            src/anyvar-containers.c \
+            tests/test-main.c \
+            tests/test-scalars.c \
+            tests/test-buffers.c \
+            tests/test-containers.c \
+            tests/test-errors.c
+        fi
+
+  check:
+    desc: Run format check, lint, tests, and coverage
+    cmds:
+      - task fmt:check
+      - task lint
+      - task test
+      - task test:coverage
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf build

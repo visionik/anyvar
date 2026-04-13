@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  host:
+    name: host-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Task
+        uses: go-task/setup-task@v1
+
+      - name: Install host dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang llvm lcov ninja-build cmake
+
+      - name: Install host dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake lcov llvm ninja
+
+      - name: Install host dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install llvm cmake ninja -y
+
+      - name: Run quality gate
+        shell: bash
+        run: task check
+
+  wasm:
+    name: wasm
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Task
+        uses: go-task/setup-task@v1
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+
+      - name: Install host dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm lcov ninja-build cmake
+
+      - name: Run quality gate
+        run: task check
+
+      - name: Build WASM variant
+        run: task build:wasm

@@ -1,0 +1,434 @@
+{
+  "vBRIEFInfo": { "version": "0.5" },
+  "plan": {
+    "title": "AnyVar SPECIFICATION",
+    "status": "approved",
+    "narratives": {
+      "Overview": "AnyVar (AVar) is a canonical, C-ABI-compatible tagged union for cross-language dynamic values. It runs unchanged on desktop (Linux/macOS/Windows), embedded (FreeRTOS/Zephyr), and WASM targets — only compile-time flags differ. The first binding is TypeScript (WASM + N-API). Serialization backends (CBOR, JSON) are pluggable via an ABackend vtable.",
+      "Architecture": "Single AVar struct: type field (uint32_t, bits 0-7 base type, bits 8-30 flags, bit 31 backend mode) plus a union of scalar/buffer/container/backend slots. Native path is fully inline. Backend path dispatches through u.backend.vtable. Three-tier container allocation: dynamic (default), fixed-cap caller-provided buffer (A_NO_HEAP), custom hooks (A_CUSTOM_ALLOC). Thread safety on by default, disabled via A_NO_THREAD_SAFE. Build: Taskfile + CMake. Tests: Unity (C), Vitest (TypeScript). CI: GitHub Actions matrix (Linux/macOS/Windows/WASM)."
+    },
+    "items": [
+      {
+        "id": "phase-1",
+        "title": "Phase 1: Core C Library",
+        "status": "pending",
+        "narrative": "Dependency: none. Phases 2, 3, and 4 all depend on Phase 1 being complete.",
+        "subItems": [
+          {
+            "id": "1.1",
+            "title": "Subphase 1.1: Project Scaffolding",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "1.1.1",
+                "title": "CMakeLists.txt: library target, compile flags, install rules, toolchain file stubs for ARM/Emscripten",
+                "status": "pending",
+                "narrative": "Acceptance: cmake --preset default configures without error on Linux/macOS/Windows. Traces: FR-16, NFR-7"
+              },
+              {
+                "id": "1.1.2",
+                "title": "Taskfile.yml: build, build:wasm, build:embedded, test, test:coverage, lint, fmt, check, clean tasks",
+                "status": "pending",
+                "narrative": "Acceptance: task --list shows all tasks; task check runs without error on clean checkout. Traces: FR-16"
+              },
+              {
+                "id": "1.1.3",
+                "title": "GitHub Actions CI: matrix job (Linux x86-64, macOS arm64, Windows x86-64, WASM/Emscripten)",
+                "status": "pending",
+                "narrative": "Acceptance: All four matrix jobs run task check on every push to main and on PRs. Traces: FR-15"
+              },
+              {
+                "id": "1.1.4",
+                "title": "Vendor Unity test framework (single-file, pin version)",
+                "status": "pending",
+                "narrative": "Acceptance: Unity.h and unity.c present under vendor/unity/; CMake test target links them. Traces: FR-17"
+              },
+              {
+                "id": "1.1.5",
+                "title": "CHANGELOG.md skeleton (Keep a Changelog format) and initial docs structure",
+                "status": "pending",
+                "narrative": "Acceptance: CHANGELOG.md has [Unreleased] section; docs/ directory exists. Traces: NFR-8"
+              }
+            ]
+          },
+          {
+            "id": "1.2",
+            "title": "Subphase 1.2: AVar Struct and Type System (anyvar.h)",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "1.2.1",
+                "title": "Define AVarType enum (uint32_t), all type constants (A_NULL through A_MAP), reserved ranges",
+                "status": "pending",
+                "narrative": "Acceptance: All type tag values match spec; reserved ranges documented. Traces: FR-1, FR-2"
+              },
+              {
+                "id": "1.2.2",
+                "title": "Define type flags (A_FLAG_BOOL_VAL, A_FLAG_OWNED, A_FLAG_CONST, A_FLAG_BACKEND) and category macros",
+                "status": "pending",
+                "narrative": "Acceptance: A_BASE_TYPE, A_IS_BACKEND, A_IS_NUMERIC, A_IS_INTEGER, A_IS_FLOAT, A_IS_BUFFER, A_IS_CONTAINER all correct as single bitwise ops. Traces: FR-3"
+              },
+              {
+                "id": "1.2.3",
+                "title": "Define AVar struct (type + union), ABackend forward declaration, AVarNative typedef alias",
+                "status": "pending",
+                "narrative": "Acceptance: sizeof(AVar) == 32 on 64-bit desktop; zero-init is valid A_NULL. _Static_assert guards struct size and type field offset. Traces: FR-1, NFR-2"
+              },
+              {
+                "id": "1.2.4",
+                "title": "Naming convention comment block at top of anyvar.h",
+                "status": "pending",
+                "narrative": "Acceptance: Header opens with a comment documenting lowerCamelCase/PascalCase/UPPER_SNAKE rules and namespace prefix. Traces: NFR-5, NFR-8"
+              },
+              {
+                "id": "1.2.5",
+                "title": "Compile-time configuration flags documented in header (A_NO_HEAP, A_CUSTOM_ALLOC, A_NO_THREAD_SAFE, A_PACKED, A_NO_MAP)",
+                "status": "pending",
+                "narrative": "Acceptance: All flags listed with descriptions; CMake exposes them as cache options. Traces: FR-11"
+              }
+            ]
+          },
+          {
+            "id": "1.3",
+            "title": "Subphase 1.3: Scalar and Buffer Helper API",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "1.3.1",
+                "title": "Inline scalar setters: aVar_setNull, aVar_setBool, aVar_setI64, aVar_setU64, aVar_setI32, aVar_setU32, aVar_setDouble, aVar_setFloat32",
+                "status": "pending",
+                "narrative": "Acceptance: Each setter is static inline; backend path dispatches via vtable; no heap allocation. Traces: FR-4, NFR-4"
+              },
+              {
+                "id": "1.3.2",
+                "title": "Inline scalar readers: aVar_type, aVar_asBool, aVar_asI64, aVar_asU64, aVar_asI32, aVar_asU32, aVar_asDouble, aVar_asFloat32",
+                "status": "pending",
+                "narrative": "Acceptance: Each reader is static inline with __builtin_expect hot-path hint. Traces: FR-4, NFR-4"
+              },
+              {
+                "id": "1.3.3",
+                "title": "Buffer setters/readers: aVar_setString, aVar_setBinary, aVar_asString, aVar_asBinary (with copy/borrow semantics)",
+                "status": "pending",
+                "narrative": "Acceptance: copy=false produces borrowed AVar (no malloc); copy=true allocates and sets A_FLAG_OWNED. Traces: FR-4, FR-9, NFR-3"
+              },
+              {
+                "id": "1.3.4",
+                "title": "Error return codes: AVAR_OK, AVAR_ERR_TYPE, AVAR_ERR_NULL, AVAR_ERR_OOM, AVAR_ERR_BOUNDS, AVAR_ERR_KEY",
+                "status": "pending",
+                "narrative": "Acceptance: All error constants defined as negative int macros; no heap used in error path. Traces: FR-6"
+              }
+            ]
+          },
+          {
+            "id": "1.4",
+            "title": "Subphase 1.4: ABackend Vtable",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "1.4.1",
+                "title": "Define ABackend struct with all required function pointers (getType, scalar readers/writers, container readers, clear, copy, serialization stubs)",
+                "status": "pending",
+                "narrative": "Acceptance: ABackend compiles; serialization pointers may be NULL; extern declarations for AVAR_CBOR_BACKEND and AVAR_JSON_BACKEND present but undefined until Phase 2. Traces: FR-5"
+              },
+              {
+                "id": "1.4.2",
+                "title": "aVar_convert: cross-backend conversion helper",
+                "status": "pending",
+                "narrative": "Acceptance: aVar_convert(&native, &AVAR_CBOR_BACKEND) produces a backend AVar; round-trip test added. Traces: FR-4"
+              }
+            ]
+          },
+          {
+            "id": "1.5",
+            "title": "Subphase 1.5: Container Types (ARRAY and MAP)",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "1.5.1",
+                "title": "ARRAY — dynamic path: aVar_arrayNew, aVar_arrayPush, aVar_arrayGet, aVar_arrayLen, aVar_arrayClear",
+                "status": "pending",
+                "narrative": "Acceptance: Dynamic growth via malloc/realloc; disabled at compile time when A_NO_HEAP set. Traces: FR-7"
+              },
+              {
+                "id": "1.5.2",
+                "title": "MAP — dynamic path: aVar_mapNew, aVar_mapSet, aVar_mapGet, aVar_mapLen, aVar_mapClear (null-terminated string keys, strcmp lookup)",
+                "status": "pending",
+                "narrative": "Acceptance: strcmp key lookup; key ownership follows A_FLAG_OWNED model; duplicate key overwrites. Traces: FR-7, FR-8"
+              },
+              {
+                "id": "1.5.3",
+                "title": "ARRAY + MAP — A_NO_HEAP path: caller-provided backing buffer, fixed capacity, no internal allocation",
+                "status": "pending",
+                "narrative": "Acceptance: With -DA_NO_HEAP, no malloc/realloc calls reachable; exceed-capacity returns AVAR_ERR_OOM. Traces: FR-7, NFR-3"
+              },
+              {
+                "id": "1.5.4",
+                "title": "ARRAY + MAP — A_CUSTOM_ALLOC path: alloc/realloc/free hook registration",
+                "status": "pending",
+                "narrative": "Acceptance: Custom allocator hooks called instead of malloc/realloc/free; test with arena allocator stub. Traces: FR-7"
+              }
+            ]
+          },
+          {
+            "id": "1.6",
+            "title": "Subphase 1.6: Ownership, Lifecycle, and Thread Safety",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "1.6.1",
+                "title": "aVar_clear: free owned buffers/containers recursively; no-op for borrowed or scalar",
+                "status": "pending",
+                "narrative": "Acceptance: Valgrind reports zero leaks for owned AVar trees; borrowed AVars not freed. Traces: FR-9, NFR-3"
+              },
+              {
+                "id": "1.6.2",
+                "title": "aVar_copy: deep copy, sets A_FLAG_OWNED on all heap-allocated nodes",
+                "status": "pending",
+                "narrative": "Acceptance: Modifying copy does not affect source; copy of A_NO_HEAP AVar allocates into heap copy. Traces: FR-9"
+              },
+              {
+                "id": "1.6.3",
+                "title": "Thread safety: default-on mutex wrapping; A_NO_THREAD_SAFE disables all locking",
+                "status": "pending",
+                "narrative": "Acceptance: With A_NO_THREAD_SAFE, zero mutex symbols linked; default build links platform mutex. Traces: FR-10"
+              }
+            ]
+          },
+          {
+            "id": "1.7",
+            "title": "Subphase 1.7: Phase 1 Test Suite (Unity)",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "1.7.1",
+                "title": "Scalar type tests: set/get/clear round-trips for all 8 scalar types; bool flag encoding; zero-init null",
+                "status": "pending",
+                "narrative": "Acceptance: 100% of scalar helpers covered; all tests green. Traces: FR-2, FR-3, NFR-6"
+              },
+              {
+                "id": "1.7.2",
+                "title": "Buffer tests: owned/borrowed set, clear frees only owned, copy produces independent owned copy",
+                "status": "pending",
+                "narrative": "Acceptance: No leaks under Valgrind; copy independence verified. Traces: FR-9, NFR-6"
+              },
+              {
+                "id": "1.7.3",
+                "title": "Container tests: array/map CRUD, exceed capacity (A_NO_HEAP), custom allocator path",
+                "status": "pending",
+                "narrative": "Acceptance: Same test file parameterised over all three allocator tiers. Traces: FR-7, FR-8"
+              },
+              {
+                "id": "1.7.4",
+                "title": "Error code tests: type mismatch, null dereference, OOM, key-not-found",
+                "status": "pending",
+                "narrative": "Acceptance: All AVAR_ERR_* constants exercised. Traces: FR-6"
+              },
+              {
+                "id": "1.7.5",
+                "title": "Coverage gate: task test:coverage enforces 100% line coverage per module",
+                "status": "pending",
+                "narrative": "Acceptance: CI fails if any module drops below 100%. Traces: NFR-6"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "phase-2",
+        "title": "Phase 2: Serialization Backends",
+        "status": "pending",
+        "narrative": "Dependency: Phase 1 complete. Phases 2.1 and 2.2 are independent and can be implemented in parallel.",
+        "subItems": [
+          {
+            "id": "2.1",
+            "title": "Subphase 2.1: CBOR Backend",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "2.1.1",
+                "title": "Hand-rolled CBOR encoder (RFC 8949): all AVar native types, deterministic mode, caller-provided output buffer",
+                "status": "pending",
+                "narrative": "Acceptance: Encoded output matches reference CBOR for all type samples; no malloc. Traces: FR-12"
+              },
+              {
+                "id": "2.1.2",
+                "title": "Hand-rolled CBOR decoder: caller-provided input buffer to AVar",
+                "status": "pending",
+                "narrative": "Acceptance: Round-trip encode/decode produces equal AVar for all type samples. Traces: FR-12"
+              },
+              {
+                "id": "2.1.3",
+                "title": "AVAR_CBOR_BACKEND: implement ABackend vtable; expose extern constant",
+                "status": "pending",
+                "narrative": "Acceptance: aVar_convert to CBOR backend succeeds; encodeCbor/decodeCbor vtable slots populated. Traces: FR-5, FR-12"
+              }
+            ]
+          },
+          {
+            "id": "2.2",
+            "title": "Subphase 2.2: JSON Backend",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "2.2.1",
+                "title": "Hand-rolled JSON encoder: all AVar native types, caller-provided char buffer",
+                "status": "pending",
+                "narrative": "Acceptance: Output is valid JSON for all type samples; no malloc. Traces: FR-13"
+              },
+              {
+                "id": "2.2.2",
+                "title": "Hand-rolled JSON decoder: caller-provided JSON string to AVar",
+                "status": "pending",
+                "narrative": "Acceptance: Round-trip encode/decode produces equal AVar. Traces: FR-13"
+              },
+              {
+                "id": "2.2.3",
+                "title": "AVAR_JSON_BACKEND: implement ABackend vtable; expose extern constant",
+                "status": "pending",
+                "narrative": "Acceptance: aVar_convert to JSON backend succeeds; encodeJson/decodeJson vtable slots populated. Traces: FR-5, FR-13"
+              }
+            ]
+          },
+          {
+            "id": "2.3",
+            "title": "Subphase 2.3: Serialization Tests",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "2.3.1",
+                "title": "Unity tests: CBOR and JSON round-trip for all native types including nested arrays/maps",
+                "status": "pending",
+                "narrative": "Acceptance: Round-trip equality for all type samples; error paths (buffer too small, malformed input) covered. Traces: FR-12, FR-13, NFR-6"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "phase-3",
+        "title": "Phase 3: TypeScript Binding",
+        "status": "pending",
+        "narrative": "Dependency: Phase 1 complete (Phase 2 required only for serialization tests in 3.5). Subphases 3.1 and 3.2 are independent and can be implemented in parallel.",
+        "subItems": [
+          {
+            "id": "3.1",
+            "title": "Subphase 3.1: WASM Build (Emscripten)",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "3.1.1",
+                "title": "CMake Emscripten toolchain integration; task build:wasm produces anyvar.wasm + glue JS",
+                "status": "pending",
+                "narrative": "Acceptance: task build:wasm succeeds; anyvar.wasm loads in Node.js and browser. Traces: FR-14, FR-16"
+              },
+              {
+                "id": "3.1.2",
+                "title": "Emscripten bindings: export all aVar_* helpers, ABackend, and compile-time config flags",
+                "status": "pending",
+                "narrative": "Acceptance: All public API functions accessible from JS via cwrap/ccall. Traces: FR-14"
+              }
+            ]
+          },
+          {
+            "id": "3.2",
+            "title": "Subphase 3.2: N-API Native Addon",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "3.2.1",
+                "title": "N-API addon wrapping all aVar_* helpers; cmake-js build integration",
+                "status": "pending",
+                "narrative": "Acceptance: require('./build/anyvar.node') loads in Node.js 18+; all helpers callable. Traces: FR-14"
+              }
+            ]
+          },
+          {
+            "id": "3.3",
+            "title": "Subphase 3.3: npm Package and TypeScript API",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "3.3.1",
+                "title": "Runtime detection: load N-API addon if available, fall back to WASM",
+                "status": "pending",
+                "narrative": "Acceptance: In Node.js environment with native addon built, N-API is selected; in browser or when addon absent, WASM is selected. Traces: FR-14"
+              },
+              {
+                "id": "3.3.2",
+                "title": "Idiomatic TypeScript API: toVariant(), fromVariant(), AnyVar class, full type definitions",
+                "status": "pending",
+                "narrative": "Acceptance: TypeScript compiles with strict mode; no any types in public API; toVariant/fromVariant round-trip all native types. Traces: FR-14, NFR-5"
+              },
+              {
+                "id": "3.3.3",
+                "title": "npm package.json: exports map, types, engines, bundled WASM asset",
+                "status": "pending",
+                "narrative": "Acceptance: npm pack produces installable package; WASM asset included; N-API addon listed as optional dep. Traces: FR-14"
+              }
+            ]
+          },
+          {
+            "id": "3.4",
+            "title": "Subphase 3.4: TypeScript Test Suite (Vitest)",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "3.4.1",
+                "title": "Vitest tests covering all native types via both WASM and N-API paths",
+                "status": "pending",
+                "narrative": "Acceptance: Tests parameterised over both backends; 100% coverage; CI runs both paths. Traces: FR-14, FR-17, NFR-6"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "phase-4",
+        "title": "Phase 4: Embedded Hardening",
+        "status": "pending",
+        "narrative": "Dependency: Phase 1 complete. Independent of Phases 2 and 3.",
+        "subItems": [
+          {
+            "id": "4.1",
+            "title": "Subphase 4.1: A_PACKED Layout and Size Verification",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "4.1.1",
+                "title": "A_PACKED build variant: struct packing attributes, _Static_assert packed size",
+                "status": "pending",
+                "narrative": "Acceptance: sizeof(AVar) reduces to ~24 bytes with A_PACKED; _Static_assert verifies. Traces: FR-11, NFR-2"
+              }
+            ]
+          },
+          {
+            "id": "4.2",
+            "title": "Subphase 4.2: ARM Cortex-M Cross-Compile Example",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "4.2.1",
+                "title": "CMake ARM Cortex-M toolchain file; task build:embedded produces ELF with A_NO_HEAP + A_NO_THREAD_SAFE + A_PACKED",
+                "status": "pending",
+                "narrative": "Acceptance: arm-none-eabi-gcc compiles cleanly; nm output shows no malloc/free symbols in the binary. Traces: FR-11, NFR-7"
+              }
+            ]
+          },
+          {
+            "id": "4.3",
+            "title": "Subphase 4.3: Zero-Allocation CI Verification",
+            "status": "pending",
+            "subItems": [
+              {
+                "id": "4.3.1",
+                "title": "Valgrind/ASan CI job: run Phase 1 test suite with A_NO_HEAP; assert zero heap allocations",
+                "status": "pending",
+                "narrative": "Acceptance: Valgrind massif or ASan reports zero heap bytes allocated in A_NO_HEAP build. Traces: NFR-3, FR-15"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
