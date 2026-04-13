@@ -95,10 +95,16 @@ tasks:
       - rm -f build/coverage/*.gcda build/coverage/*.gcno "{{.COVERAGE_INFO}}" "{{.FILTERED_COVERAGE_INFO}}"
       - |
         python3 - <<'PY'
+        import platform
         from pathlib import Path
 
         wrapper = Path("build/coverage/llvm-cov-gcov")
-        wrapper.write_text('#!/bin/sh\nexec "{{.LLVM_COV}}" gcov "$@"\n')
+        # macOS coverage builds use Homebrew Clang -> needs llvm-cov gcov.
+        # Linux/WASM builds fall back to the system default cc (gcc) -> use gcov.
+        if platform.system() == "Darwin":
+            wrapper.write_text('#!/bin/sh\nexec "{{.LLVM_COV}}" gcov "$@"\n')
+        else:
+            wrapper.write_text('#!/bin/sh\nexec gcov "$@"\n')
         wrapper.chmod(0o755)
         PY
       - ctest --preset coverage
